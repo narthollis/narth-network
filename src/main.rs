@@ -2,16 +2,20 @@ mod arp;
 mod common;
 mod ethernet;
 mod icmp;
+mod interface;
 mod ipv4;
 mod mac;
 
 use crate::arp::{ArpMessage, ArpTable};
 use crate::ethernet::{EtherType, EthernetMessage};
 use crate::icmp::{ICMPMessage, ICMPMessageTypes};
+use crate::interface::{Interface, Network};
 use crate::ipv4::{IPProtocolTypes, IPv4Header};
 use crate::mac::MacAddr;
 use std::fmt::Formatter;
 use std::net::Ipv4Addr;
+use std::thread::sleep;
+use std::time::Duration;
 use tun_rs::SyncDevice;
 
 const MTU: u16 = 1500;
@@ -24,8 +28,8 @@ const IPV4_OURS: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 1);
 const IPV4_HOST: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 2);
 const IPV4_NETWORK_PREFIX: u8 = 24;
 
-fn main() {
-    let iface = tun_rs::DeviceBuilder::new()
+fn main() -> std::io::Result<()> {
+    let connection = tun_rs::DeviceBuilder::new()
         .name("narth%d")
         .layer(tun_rs::Layer::L2)
         .mac_addr(MAC_HOST.octets())
@@ -33,27 +37,40 @@ fn main() {
         .ipv4(IPV4_HOST, IPV4_NETWORK_PREFIX, None)
         //.ipv6()
         .packet_information(false)
-        .build_sync()
-        .expect("Failed to build network interface");
+        .build_sync()?;
 
-    println!("created tun device: {}", iface.name().unwrap());
+    let mut network = Network::new(&connection).expect("Failed to build network interface");
 
-    let mut arp_table = ArpTable::new();
-    send_garp(&iface).expect("Failed to send garp message");
+    println!("created tun device: {}", network.device_name().unwrap());
 
-    println!("entering listen loop");
-    loop {
-        let mut buffer = vec![0; FRAME];
-
-        if let Ok(recv_count) = iface.recv(&mut buffer)
-            && let Err(err) = on_recv(&iface, &mut arp_table, &buffer[..recv_count])
-        {
-            println!("failed to handle received packet: {}", err);
-        }
+    if std::env::args().any(|a| a == "--wait") {
+        sleep(Duration::from_secs(10));
     }
 
-    //println!("recv: {:?}", &buffer[..size]);
+    network.add_interface(MAC_OURS, IPV4_OURS)?;
+
+    network.execute()
 }
+
+// let mut arp_table = ArpTable::new();
+// send_garp(&iface).expect("Failed to send garp message");
+
+// let ping = ICMPMessage::new_echo_request(None, 1);
+// let ip = IPv4Header::new(
+//     IPProtocolTypes::ICMP,
+//     IPV4_OURS,
+//     IPV4_HOST,
+//     ping.len("constructing ipv4"),
+// );
+// let e = EthernetMessage::new(EtherType::IPv4, MAC_OURS, MAC_HOST);
+
+// let buf = &mut [0u8; 98];
+// let mut count = e.write(&mut buf[..]).unwrap();
+// count += ip.write(&mut buf[count..]).unwrap();
+// count += ping.write(&mut buf[count..]).unwrap();
+
+//     //println!("recv: {:?}", &buffer[..size]);
+// }
 
 #[derive(Debug)]
 struct ReceiveError(String);
@@ -87,11 +104,11 @@ fn on_recv(iface: &SyncDevice, arp_table: &mut ArpTable, frame: &[u8]) -> Result
             println!();
 
             let mut buffer = vec![0; FRAME];
-
-            arp_table
-                .handle(ethernet, arp, MAC_OURS, IPV4_OURS, &mut buffer[..])
-                .and_then(|count| iface.send(&buffer[..count]))
-                .map_err(|e| ReceiveError(format!("Failed to send ARP response {:?}", e)))?;
+            //
+            // arp_table
+            //     .handle(ethernet, arp, MAC_OURS, IPV4_OURS, &mut buffer[..])
+            //     .and_then(|count| iface.send(&buffer[..count]))
+            //     .map_err(|e| ReceiveError(format!("Failed to send ARP response {:?}", e)))?;
         }
         EtherType::IPv4 => {
             let ipv4 = IPv4Header::from_bytes(ethernet.payload())
@@ -105,16 +122,16 @@ fn on_recv(iface: &SyncDevice, arp_table: &mut ArpTable, frame: &[u8]) -> Result
                         ReceiveError(format!("Failed to parse ICMP message: {}", e))
                     })?;
 
-                    if let ICMPMessageTypes::Echo(echo) = icmp.message {
+                    if let ICMPMessageTypes::Echo(echo) = &icmp.message {
                         println!("> {:?}", icmp);
 
-                        let echo_reply = ICMPMessage::new(ICMPMessageTypes::EchoReply(echo));
+                        let echo_reply = ICMPMessage::echo_reply(echo);
 
                         let ipv4_reply = IPv4Header::new(
                             IPProtocolTypes::ICMP,
                             ipv4.destination_address(),
                             ipv4.source_address(),
-                            icmp.len(),
+                            icmp.len("in echo reply ipv4 construction"),
                         );
                         let ethernet_reply = ethernet.create_reply(MAC_OURS);
 

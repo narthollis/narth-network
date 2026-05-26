@@ -30,6 +30,16 @@ impl std::fmt::Debug for MacAddr {
     }
 }
 
+impl std::fmt::Display for MacAddr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            self.0, self.1, self.2, self.3, self.4, self.5
+        )
+    }
+}
+
 impl From<[u8; 6]> for MacAddr {
     fn from(bytes: [u8; 6]) -> MacAddr {
         MacAddr(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])

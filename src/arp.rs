@@ -161,6 +161,13 @@ impl ArpMessage {
         })
     }
 
+    pub fn destination_mac(&self) -> MacAddr {
+        self.target_hardware_addr
+    }
+    pub fn len(&self) -> usize {
+        28
+    }
+
     pub fn reply(&self, mac: MacAddr, ipv4: Ipv4Addr) -> ArpMessage {
         ArpMessage {
             operation: Operation::Reply,
@@ -173,9 +180,9 @@ impl ArpMessage {
 
     pub fn create_ethernet(&'_ self) -> EthernetMessage<'_> {
         EthernetMessage::new(
-            self.target_hardware_addr,
-            self.sender_hardware_addr,
             EtherType::ARP,
+            self.sender_hardware_addr,
+            self.target_hardware_addr,
         )
     }
 
@@ -218,30 +225,28 @@ impl ArpTable {
 
     pub fn handle(
         &mut self,
-        recv_ether: EthernetMessage,
         recv_arp: ArpMessage,
         our_mac: MacAddr,
         our_ip: Ipv4Addr,
-        buffer: &mut [u8],
-    ) -> Result<usize, Error> {
+    ) -> Result<ArpMessage, Error> {
         self.table
             .entry(recv_arp.sender_hardware_addr)
             .or_default()
             .insert(recv_arp.sender_protocol_addr);
 
-        let reply_ether = recv_ether.create_reply(our_mac);
-        let reply_arp = recv_arp.reply(our_mac, our_ip);
-
-        let mut count = 0;
-        count += reply_ether.write(&mut buffer[..])?;
-        count += reply_arp.write(&mut buffer[count..])?;
-
-        let r = EthernetMessage::from_bytes(&buffer[..count]);
-        let ra = ArpMessage::from_bytes(r.payload()).unwrap();
-
-        println!("< {:?}", r);
-        println!("< {:?}", ra);
-
-        Ok(count)
+        Ok(recv_arp.reply(our_mac, our_ip))
     }
+
+    // let mut count = 0;
+    //     count += reply_ether.write(&mut buffer[..])?;
+    //     count += reply_arp.write(&mut buffer[count..])?;
+
+    // let r = EthernetMessage::from_bytes(&buffer[..count]);
+    // let ra = ArpMessage::from_bytes(r.payload()).unwrap();
+
+    // println!("< {:?}", r);
+    // println!("< {:?}", ra);
+
+    //     Ok(count)
+    // }
 }

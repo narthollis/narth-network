@@ -78,7 +78,7 @@ pub struct EthernetMessage<'a> {
 }
 
 impl<'a> EthernetMessage<'a> {
-    pub fn new(destination: MacAddr, source: MacAddr, ether_type: EtherType) -> Self {
+    pub fn new(ether_type: EtherType, source: MacAddr, destination: MacAddr) -> Self {
         EthernetMessage {
             destination_address: destination,
             source_address: source,
@@ -142,6 +142,12 @@ impl<'a> EthernetMessage<'a> {
     }
     pub fn payload(&self) -> &'a [u8] {
         self.payload
+    }
+    pub fn header_len(&self) -> usize {
+        match self.vlan {
+            None => 14,
+            Some(_) => 18,
+        }
     }
 }
 

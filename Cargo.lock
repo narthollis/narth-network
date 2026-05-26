@@ -255,6 +255,7 @@ dependencies = [
  "bitmatch",
  "fastrand",
  "internet-checksum",
+ "ipnet",
  "tun-rs",
 ]
 

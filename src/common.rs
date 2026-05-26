@@ -16,7 +16,12 @@ impl<'a> ChecksummingWriter<'a> {
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         use std::io::Write;
         self.checksum.add_bytes(bytes);
-        self.buffer.write(bytes)
+
+        let written = self.buffer.write(bytes)?;
+
+        debug_assert_eq!(written, bytes.len());
+
+        Ok(written)
     }
 
     pub fn checksum(&self) -> [u8; 2] {
