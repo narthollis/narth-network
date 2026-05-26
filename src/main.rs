@@ -1,84 +1,160 @@
 mod arp;
+mod common;
 mod ethernet;
+mod icmp;
+mod ipv4;
+mod mac;
 
 use crate::arp::{ArpMessage, ArpTable};
 use crate::ethernet::{EtherType, EthernetMessage};
-use std::thread::sleep;
-use std::time::Duration;
+use crate::icmp::{ICMPMessage, ICMPMessageTypes};
+use crate::ipv4::{IPProtocolTypes, IPv4Header};
+use crate::mac::MacAddr;
+use std::fmt::Formatter;
+use std::net::Ipv4Addr;
 use tun_rs::SyncDevice;
 
 const MTU: u16 = 1500;
 const ETHER_HEADER: usize = 38;
 const FRAME: usize = MTU as usize + ETHER_HEADER;
 
-const MAC_OURS: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
-const IPV4_OURS: [u8; 4] = [192, 168, 20, 1];
-const MAC_HOST: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x10];
-const MAC_BROADCAST: [u8; 6] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+const MAC_OURS: MacAddr = MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x01);
+const MAC_HOST: MacAddr = MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x10);
+const IPV4_OURS: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 1);
+const IPV4_HOST: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 2);
+const IPV4_NETWORK_PREFIX: u8 = 24;
 
 fn main() {
     let iface = tun_rs::DeviceBuilder::new()
         .name("narth%d")
         .layer(tun_rs::Layer::L2)
-        .mac_addr(MAC_HOST)
+        .mac_addr(MAC_HOST.octets())
         .mtu(MTU)
-        .ipv4("192.168.20.2", 24, None)
+        .ipv4(IPV4_HOST, IPV4_NETWORK_PREFIX, None)
         //.ipv6()
         .packet_information(false)
         .build_sync()
         .expect("Failed to build network interface");
 
     println!("created tun device: {}", iface.name().unwrap());
-    sleep(Duration::from_secs(30));
 
     let mut arp_table = ArpTable::new();
     send_garp(&iface).expect("Failed to send garp message");
 
+    println!("entering listen loop");
     loop {
         let mut buffer = vec![0; FRAME];
 
-        let recv_size = iface.recv(&mut buffer).unwrap();
-        let ethernet = EthernetMessage::from_bytes(&buffer[..recv_size]);
-
-        // Neive mac filtering...
-        if !ethernet.destination_address.eq(&MAC_OURS)
-            && !ethernet.destination_address.eq(&MAC_BROADCAST)
+        if let Ok(recv_count) = iface.recv(&mut buffer)
+            && let Err(err) = on_recv(&iface, &mut arp_table, &buffer[..recv_count])
         {
-            // It's not for us
-            continue;
+            println!("failed to handle received packet: {}", err);
         }
-
-        println!("> {:?}", ethernet);
-        match ethernet.ether_type {
-            EtherType::ARP => {
-                let arp = ArpMessage::from_bytes(ethernet.payload).unwrap();
-                println!("> {:?}", arp);
-
-                let mut buffer = vec![0; FRAME];
-
-                let count = arp_table
-                    .handle(ethernet, arp, MAC_OURS, IPV4_OURS, &mut buffer[..])
-                    .unwrap();
-
-                let r = EthernetMessage::from_bytes(&buffer[..count]);
-                let ra = ArpMessage::from_bytes(r.payload).unwrap();
-
-                println!("< {:?}", r);
-                println!("< {:?}", ra);
-
-                if count > 0 {
-                    iface
-                        .send(&buffer[..count])
-                        .expect("Failed to send ARP message");
-                }
-            }
-            EtherType::IPv4 => {}
-            EtherType::IPv6 => {}
-            _ => {}
-        }
-
-        //println!("recv: {:?}", &buffer[..size]);
     }
+
+    //println!("recv: {:?}", &buffer[..size]);
+}
+
+#[derive(Debug)]
+struct ReceiveError(String);
+impl std::error::Error for ReceiveError {}
+impl std::fmt::Display for ReceiveError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ReceiveError").field(&self.0).finish()
+    }
+}
+
+fn on_recv(iface: &SyncDevice, arp_table: &mut ArpTable, frame: &[u8]) -> Result<(), ReceiveError> {
+    let ethernet = EthernetMessage::from_bytes(frame);
+
+    // Neive mac filtering...
+    if !ethernet.destination_address().eq(&MAC_OURS)
+        && !ethernet.destination_address().is_broadcast()
+    {
+        // It's not for us
+        return Ok(());
+    }
+
+    println!();
+    println!();
+    println!("> {:?}", ethernet);
+    match ethernet.ether_type() {
+        EtherType::ARP => {
+            let arp = ArpMessage::from_bytes(ethernet.payload())
+                .map_err(|e| ReceiveError(format!("Failed to parse ARP message: {}", e)))?;
+
+            println!("> {:?}", arp);
+            println!();
+
+            let mut buffer = vec![0; FRAME];
+
+            arp_table
+                .handle(ethernet, arp, MAC_OURS, IPV4_OURS, &mut buffer[..])
+                .and_then(|count| iface.send(&buffer[..count]))
+                .map_err(|e| ReceiveError(format!("Failed to send ARP response {:?}", e)))?;
+        }
+        EtherType::IPv4 => {
+            let ipv4 = IPv4Header::from_bytes(ethernet.payload())
+                .map_err(|e| ReceiveError(format!("Failed to parse IPv4 header: {}", e)))?;
+            println!("> {:?}", ipv4);
+            // TODO Check dest address is us and send an ICMP Destination Not Reachable otherwise
+
+            match ipv4.protocol() {
+                IPProtocolTypes::ICMP => {
+                    let icmp = ICMPMessage::from_bytes(ipv4.payload()).map_err(|e| {
+                        ReceiveError(format!("Failed to parse ICMP message: {}", e))
+                    })?;
+
+                    if let ICMPMessageTypes::Echo(echo) = icmp.message {
+                        println!("> {:?}", icmp);
+
+                        let echo_reply = ICMPMessage::new(ICMPMessageTypes::EchoReply(echo));
+
+                        let ipv4_reply = IPv4Header::new(
+                            IPProtocolTypes::ICMP,
+                            ipv4.destination_address(),
+                            ipv4.source_address(),
+                            icmp.len(),
+                        );
+                        let ethernet_reply = ethernet.create_reply(MAC_OURS);
+
+                        let mut buffer = vec![0; FRAME];
+                        let mut count = 0;
+                        count += ethernet_reply.write(&mut buffer[count..]).map_err(|e| {
+                            ReceiveError(format!("Failed to write ethernet reply: {}", e))
+                        })?;
+                        count += ipv4_reply.write(&mut buffer[count..]).map_err(|e| {
+                            ReceiveError(format!("Failed to write ipv4 reply: {}", e))
+                        })?;
+                        count += echo_reply.write(&mut buffer[count..]).map_err(|e| {
+                            ReceiveError(format!("Failed to write echo reply: {}", e))
+                        })?;
+
+                        println!();
+                        let er = EthernetMessage::from_bytes(&buffer[..count]);
+                        println!("< {:?}", er);
+                        let ir = IPv4Header::from_bytes(er.payload()).unwrap();
+                        println!("< {:?}", ir);
+                        let r = ICMPMessage::from_bytes(ir.payload()).unwrap();
+                        println!("< {:?}", r);
+
+                        iface.send(&buffer[..count]).map_err(|e| {
+                            ReceiveError(format!("Failed to send ICMP Echo Reply message: {}", e))
+                        })?;
+                    } else {
+                        eprintln!("RECEIVED ICMP {:?}", icmp);
+                    }
+
+                    Ok(())
+                }
+                _ => Ok(()),
+            }?;
+        }
+        EtherType::IPv6 => {}
+        _ => {}
+    }
+
+    Ok(())
 }
 
 fn send_garp(iface: &SyncDevice) -> Result<(), std::io::Error> {
@@ -91,7 +167,7 @@ fn send_garp(iface: &SyncDevice) -> Result<(), std::io::Error> {
     count += garp.write(&mut buffer[count..])?;
 
     let r = EthernetMessage::from_bytes(&buffer[..count]);
-    let ra = ArpMessage::from_bytes(r.payload).unwrap();
+    let ra = ArpMessage::from_bytes(r.payload()).unwrap();
 
     println!("< {:?}", r);
     println!("< {:?}", ra);

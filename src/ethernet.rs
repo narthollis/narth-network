@@ -1,3 +1,4 @@
+use crate::mac::MacAddr;
 use std::fmt::{Debug, Display, Formatter};
 
 const ETHER_TYPE_IPV4: u16 = 0x0800;
@@ -69,15 +70,15 @@ impl Display for EtherType {
 
 #[derive(PartialEq, Copy, Clone)]
 pub struct EthernetMessage<'a> {
-    pub destination_address: &'a [u8; 6],
-    pub source_address: &'a [u8; 6],
-    pub ether_type: EtherType,
-    pub vlan: Option<u16>,
-    pub payload: &'a [u8],
+    destination_address: MacAddr,
+    source_address: MacAddr,
+    ether_type: EtherType,
+    vlan: Option<u16>,
+    payload: &'a [u8],
 }
 
 impl<'a> EthernetMessage<'a> {
-    pub fn new(destination: &'a [u8; 6], source: &'a [u8; 6], ether_type: EtherType) -> Self {
+    pub fn new(destination: MacAddr, source: MacAddr, ether_type: EtherType) -> Self {
         EthernetMessage {
             destination_address: destination,
             source_address: source,
@@ -107,18 +108,11 @@ impl<'a> EthernetMessage<'a> {
         }
     }
 
-    pub fn len(&self) -> usize {
-        match self.vlan {
-            None => 14,
-            Some(_) => 18,
-        }
-    }
-
-    pub fn create_reply(&self, our_mac: &'a [u8; 6]) -> EthernetMessage<'a> {
+    pub fn create_reply(&self, our_mac: MacAddr) -> EthernetMessage<'a> {
         let mut reply = self.clone();
 
         reply.destination_address = reply.source_address;
-        reply.source_address = &our_mac;
+        reply.source_address = our_mac;
 
         reply
     }
@@ -126,8 +120,8 @@ impl<'a> EthernetMessage<'a> {
     pub fn write(&self, mut buffer: &mut [u8]) -> Result<usize, std::io::Error> {
         use std::io::Write;
 
-        let mut count = buffer.write(self.destination_address)?;
-        count += buffer.write(self.source_address)?;
+        let mut count = buffer.write(&self.destination_address.octets())?;
+        count += buffer.write(&self.source_address.octets())?;
         if let Some(vlan) = self.vlan {
             count += buffer.write(&ETHER_TYPE_VLAN.to_be_bytes())?;
             count += buffer.write(&vlan.to_be_bytes())?;
@@ -135,6 +129,19 @@ impl<'a> EthernetMessage<'a> {
         let ether_type: [u8; 2] = self.ether_type.into();
         count += buffer.write(&ether_type)?;
         Ok(count)
+    }
+
+    pub fn destination_address(&self) -> MacAddr {
+        self.destination_address
+    }
+    pub fn source_address(&self) -> MacAddr {
+        self.source_address
+    }
+    pub fn ether_type(&self) -> EtherType {
+        self.ether_type
+    }
+    pub fn payload(&self) -> &'a [u8] {
+        self.payload
     }
 }
 
@@ -149,46 +156,3 @@ impl Debug for EthernetMessage<'_> {
             .finish()
     }
 }
-
-//
-// impl Display for EthernetMessage<'_> {
-//     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-//         writeln!(f, "+-------+-------+-------+-------+-------+-------+")?;
-//         writeln!(
-//             f,
-//             "| 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | # Destination MAC",
-//             self.destination_address[0],
-//             self.destination_address[1],
-//             self.destination_address[2],
-//             self.destination_address[3],
-//             self.destination_address[4],
-//             self.destination_address[5]
-//         )?;
-//         writeln!(f, "+-------+-------+-------+-------+-------+-------+")?;
-//         writeln!(
-//             f,
-//             "| 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | 0x{:02x}  | # Source MAC",
-//             self.source_address[0],
-//             self.source_address[1],
-//             self.source_address[2],
-//             self.source_address[3],
-//             self.source_address[4],
-//             self.source_address[5]
-//         )?;
-//         writeln!(f, "+-------+-------+-------+-------+-------+-------+")?;
-//
-//         if let Some(vlan) = self.vlan {
-//             writeln!(
-//                 f,
-//                 "| 0x8100          | 0x{:04x}        | {:<14}|",
-//                 vlan, self.ether_type
-//             )?;
-//             writeln!(f, "+-------+-------+-------+-------+-------+-------+")?;
-//         } else {
-//             writeln!(f, "| {:<14}|", self.ether_type)?;
-//             writeln!(f, "+-------+-------+")?;
-//         }
-//
-//         Ok(())
-//     }
-// }

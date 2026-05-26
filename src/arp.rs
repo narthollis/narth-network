@@ -1,6 +1,9 @@
 use crate::ethernet::{EtherType, EthernetMessage};
+use crate::mac;
+use crate::mac::{BROADCAST as MAC_BROADCAST, MacAddr};
 use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind};
+use std::net::Ipv4Addr;
 
 #[derive(Debug, PartialEq)]
 pub enum HardwareType {
@@ -11,7 +14,7 @@ impl From<[u8; 2]> for HardwareType {
     fn from(v: [u8; 2]) -> Self {
         match v {
             [0x00, 0x01] => HardwareType::Ethernet,
-            _ => HardwareType::Other(u16::from_be_bytes(v.try_into().unwrap())),
+            _ => HardwareType::Other(u16::from_be_bytes(v)),
         }
     }
 }
@@ -80,13 +83,16 @@ impl From<Operation> for [u8; 2] {
 #[derive(Debug, PartialEq)]
 pub struct ArpMessage {
     operation: Operation,
-    sender_hardware_addr: [u8; 6],
-    sender_protocol_addr: [u8; 4],
-    target_hardware_addr: [u8; 6],
-    target_protocol_addr: [u8; 4],
+    sender_hardware_addr: MacAddr,
+    sender_protocol_addr: Ipv4Addr,
+    target_hardware_addr: MacAddr,
+    target_protocol_addr: Ipv4Addr,
 }
 
 fn parse_eol_error(e: std::array::TryFromSliceError) -> Error {
+    Error::new(ErrorKind::UnexpectedEof, e)
+}
+fn parse_mac_eol_error(e: mac::TryFromSliceError) -> Error {
     Error::new(ErrorKind::UnexpectedEof, e)
 }
 fn parse_data_error(message: &str) -> Error {
@@ -94,12 +100,12 @@ fn parse_data_error(message: &str) -> Error {
 }
 
 impl ArpMessage {
-    pub fn gratuitous(mac: [u8; 6], ipv4: [u8; 4]) -> Self {
+    pub fn gratuitous(mac: MacAddr, ipv4: Ipv4Addr) -> Self {
         ArpMessage {
             operation: Operation::Request,
             sender_hardware_addr: mac,
             sender_protocol_addr: ipv4,
-            target_hardware_addr: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            target_hardware_addr: MAC_BROADCAST,
             target_protocol_addr: ipv4,
         }
     }
@@ -138,16 +144,24 @@ impl ArpMessage {
             ));
         }
 
+        let sender_protocol_addr_raw: [u8; 4] =
+            bytes[14..18].try_into().map_err(parse_eol_error)?;
+        let sender_protocol_addr = sender_protocol_addr_raw.into();
+
+        let target_protocol_addr_raw: [u8; 4] =
+            bytes[24..28].try_into().map_err(parse_eol_error)?;
+        let target_protocol_addr = target_protocol_addr_raw.into();
+
         Ok(ArpMessage {
             operation,
-            sender_hardware_addr: bytes[8..14].try_into().map_err(parse_eol_error)?,
-            sender_protocol_addr: bytes[14..18].try_into().map_err(parse_eol_error)?,
-            target_hardware_addr: bytes[18..24].try_into().map_err(parse_eol_error)?,
-            target_protocol_addr: bytes[24..28].try_into().map_err(parse_eol_error)?,
+            sender_hardware_addr: bytes[8..14].try_into().map_err(parse_mac_eol_error)?,
+            sender_protocol_addr,
+            target_hardware_addr: bytes[18..24].try_into().map_err(parse_mac_eol_error)?,
+            target_protocol_addr,
         })
     }
 
-    pub fn reply(&self, mac: [u8; 6], ipv4: [u8; 4]) -> ArpMessage {
+    pub fn reply(&self, mac: MacAddr, ipv4: Ipv4Addr) -> ArpMessage {
         ArpMessage {
             operation: Operation::Reply,
             sender_hardware_addr: mac,
@@ -159,8 +173,8 @@ impl ArpMessage {
 
     pub fn create_ethernet(&'_ self) -> EthernetMessage<'_> {
         EthernetMessage::new(
-            &self.target_hardware_addr,
-            &self.sender_hardware_addr,
+            self.target_hardware_addr,
+            self.sender_hardware_addr,
             EtherType::ARP,
         )
     }
@@ -182,17 +196,17 @@ impl ArpMessage {
         let operation: [u8; 2] = self.operation.into();
         count += buffer.write(&operation)?;
 
-        count += buffer.write(&self.sender_hardware_addr)?;
-        count += buffer.write(&self.sender_protocol_addr)?;
-        count += buffer.write(&self.target_hardware_addr)?;
-        count += buffer.write(&self.target_protocol_addr)?;
+        count += buffer.write(&self.sender_hardware_addr.octets())?;
+        count += buffer.write(&self.sender_protocol_addr.octets())?;
+        count += buffer.write(&self.target_hardware_addr.octets())?;
+        count += buffer.write(&self.target_protocol_addr.octets())?;
 
         Ok(count)
     }
 }
 
 pub struct ArpTable {
-    table: HashMap<[u8; 6], HashSet<[u8; 4]>>,
+    table: HashMap<MacAddr, HashSet<Ipv4Addr>>,
 }
 
 impl ArpTable {
@@ -206,8 +220,8 @@ impl ArpTable {
         &mut self,
         recv_ether: EthernetMessage,
         recv_arp: ArpMessage,
-        our_mac: [u8; 6],
-        our_ip: [u8; 4],
+        our_mac: MacAddr,
+        our_ip: Ipv4Addr,
         buffer: &mut [u8],
     ) -> Result<usize, Error> {
         self.table
@@ -215,12 +229,18 @@ impl ArpTable {
             .or_default()
             .insert(recv_arp.sender_protocol_addr);
 
-        let reply_ether = recv_ether.create_reply(&our_mac);
+        let reply_ether = recv_ether.create_reply(our_mac);
         let reply_arp = recv_arp.reply(our_mac, our_ip);
 
         let mut count = 0;
         count += reply_ether.write(&mut buffer[..])?;
         count += reply_arp.write(&mut buffer[count..])?;
+
+        let r = EthernetMessage::from_bytes(&buffer[..count]);
+        let ra = ArpMessage::from_bytes(r.payload()).unwrap();
+
+        println!("< {:?}", r);
+        println!("< {:?}", ra);
 
         Ok(count)
     }

@@ -6,3 +6,6 @@ rust-version = "1.93.0"
 
 [dependencies]
 tun-rs = { version = "2.8.3", default-features = false, features = [] }
+bitmatch = { version = "0.1.1" }
+internet-checksum = "0.2.1"
+fastrand = "2.4.1"
