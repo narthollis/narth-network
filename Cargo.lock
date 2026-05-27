@@ -253,6 +253,7 @@ name = "narth-net"
 version = "0.1.0"
 dependencies = [
  "bitmatch",
+ "bytes",
  "fastrand",
  "internet-checksum",
  "ipnet",

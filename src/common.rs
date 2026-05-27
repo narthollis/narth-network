@@ -28,3 +28,37 @@ impl<'a> ChecksummingWriter<'a> {
         self.checksum.checksum()
     }
 }
+
+pub(crate) trait WriteToBuffer {
+    fn write_to_buffer(&self, buffer: &mut [u8]) -> std::io::Result<usize>;
+}
+
+impl<A, B> WriteToBuffer for (A, B)
+where
+    A: WriteToBuffer,
+    B: WriteToBuffer,
+{
+    fn write_to_buffer(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let mut written = 0;
+        written += self.0.write_to_buffer(&mut buffer[written..])?;
+        written += self.1.write_to_buffer(&mut buffer[written..])?;
+
+        Ok(written)
+    }
+}
+
+impl<A, B, C> WriteToBuffer for (A, B, C)
+where
+    A: WriteToBuffer,
+    B: WriteToBuffer,
+    C: WriteToBuffer,
+{
+    fn write_to_buffer(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let mut written = 0;
+        written += self.0.write_to_buffer(&mut buffer[written..])?;
+        written += self.1.write_to_buffer(&mut buffer[written..])?;
+        written += self.2.write_to_buffer(&mut buffer[written..])?;
+
+        Ok(written)
+    }
+}

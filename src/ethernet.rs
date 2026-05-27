@@ -1,3 +1,4 @@
+use crate::common::WriteToBuffer;
 use crate::mac::MacAddr;
 use std::fmt::{Debug, Display, Formatter};
 
@@ -31,9 +32,15 @@ impl From<[u8; 2]> for EtherType {
         }
     }
 }
-impl From<&[u8]> for EtherType {
-    fn from(value: &[u8]) -> Self {
-        [value[0], value[1]].try_into().unwrap()
+impl TryFrom<&[u8]> for EtherType {
+    type Error = std::io::Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let v: [u8; 2] = value
+            .try_into()
+            .map_err(err_as_eof("failed to decode EtherType"))?;
+
+        Ok(v.into())
     }
 }
 
@@ -68,67 +75,56 @@ impl Display for EtherType {
     }
 }
 
-#[derive(PartialEq, Copy, Clone)]
-pub struct EthernetMessage<'a> {
+#[derive(PartialEq, Clone)]
+pub struct EthernetHeader {
     destination_address: MacAddr,
     source_address: MacAddr,
     ether_type: EtherType,
     vlan: Option<u16>,
-    payload: &'a [u8],
 }
 
-impl<'a> EthernetMessage<'a> {
+impl EthernetHeader {
     pub fn new(ether_type: EtherType, source: MacAddr, destination: MacAddr) -> Self {
-        EthernetMessage {
+        EthernetHeader {
             destination_address: destination,
             source_address: source,
             ether_type,
             vlan: None,
-            payload: &[],
         }
     }
 
-    pub fn from_bytes(bytes: &'a [u8]) -> Self {
-        let mut ether_type = bytes[12..14].try_into().expect("Can't read protocol");
+    pub fn from_bytes(bytes: &bytes::Bytes) -> std::io::Result<Self> {
+        let mut ether_type = bytes[12..14].try_into()?;
         let mut vlan = None;
-        let mut header_size = 14usize;
 
         if ether_type == EtherType::VLAN {
-            vlan = Some(u16::from_be_bytes(bytes[14..16].try_into().unwrap()));
-            ether_type = bytes[16..18].try_into().unwrap();
-            header_size = 18;
+            vlan = Some(u16::from_be_bytes(
+                bytes[14..16]
+                    .try_into()
+                    .map_err(err_as_eof("failed to parse vlan"))?,
+            ));
+            ether_type = bytes[16..18].try_into()?;
         }
 
-        EthernetMessage {
-            destination_address: bytes[0..6].try_into().unwrap(),
-            source_address: bytes[6..12].try_into().unwrap(),
+        Ok(EthernetHeader {
+            destination_address: bytes[0..6]
+                .try_into()
+                .map_err(err_as_eof("failed to parse destination"))?,
+            source_address: bytes[6..12]
+                .try_into()
+                .map_err(err_as_eof("failed to parse source"))?,
             ether_type,
             vlan,
-            payload: &bytes[header_size..],
-        }
+        })
     }
 
-    pub fn create_reply(&self, our_mac: MacAddr) -> EthernetMessage<'a> {
+    pub fn create_reply(&self, our_mac: MacAddr) -> EthernetHeader {
         let mut reply = self.clone();
 
         reply.destination_address = reply.source_address;
         reply.source_address = our_mac;
 
         reply
-    }
-
-    pub fn write(&self, mut buffer: &mut [u8]) -> Result<usize, std::io::Error> {
-        use std::io::Write;
-
-        let mut count = buffer.write(&self.destination_address.octets())?;
-        count += buffer.write(&self.source_address.octets())?;
-        if let Some(vlan) = self.vlan {
-            count += buffer.write(&ETHER_TYPE_VLAN.to_be_bytes())?;
-            count += buffer.write(&vlan.to_be_bytes())?;
-        }
-        let ether_type: [u8; 2] = self.ether_type.into();
-        count += buffer.write(&ether_type)?;
-        Ok(count)
     }
 
     pub fn destination_address(&self) -> MacAddr {
@@ -140,10 +136,8 @@ impl<'a> EthernetMessage<'a> {
     pub fn ether_type(&self) -> EtherType {
         self.ether_type
     }
-    pub fn payload(&self) -> &'a [u8] {
-        self.payload
-    }
-    pub fn header_len(&self) -> usize {
+
+    pub fn len(&self) -> usize {
         match self.vlan {
             None => 14,
             Some(_) => 18,
@@ -151,14 +145,46 @@ impl<'a> EthernetMessage<'a> {
     }
 }
 
-impl Debug for EthernetMessage<'_> {
+impl WriteToBuffer for EthernetHeader {
+    fn write_to_buffer(&self, mut buffer: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::Write;
+
+        let mut count = 0;
+
+        count += buffer.write(&self.destination_address.octets())?;
+        count += buffer.write(&self.source_address.octets())?;
+
+        if let Some(vlan) = self.vlan {
+            count += buffer.write(&ETHER_TYPE_VLAN.to_be_bytes())?;
+            count += buffer.write(&vlan.to_be_bytes())?;
+        }
+
+        let ether_type: [u8; 2] = self.ether_type.into();
+        count += buffer.write(&ether_type)?;
+
+        Ok(count)
+    }
+}
+
+impl Debug for EthernetHeader {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EthernetMessage")
+        f.debug_struct("EthernetHeader")
             .field("destination_address", &self.destination_address)
             .field("source_address", &self.source_address)
             .field("ether_type", &self.ether_type)
             .field("vlan", &self.vlan)
-            .field("payload", &format_args!("len({})", self.payload.len()))
             .finish()
+    }
+}
+
+fn err_as_eof<T>(message: &str) -> impl Fn(T) -> std::io::Error
+where
+    T: std::error::Error,
+{
+    move |e| {
+        std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("{}: {}", message, e),
+        )
     }
 }

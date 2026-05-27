@@ -1,4 +1,4 @@
-use crate::common::ChecksummingWriter;
+use crate::common::{ChecksummingWriter, WriteToBuffer};
 use bitmatch::bitmatch;
 use std::fmt::{Debug, Formatter};
 use std::io::{Error, ErrorKind};
@@ -299,7 +299,6 @@ pub struct IPv4Header<'a> {
     source_address: Ipv4Addr,
     destination_address: Ipv4Addr,
     options_and_padding: &'a [u8],
-    payload: &'a [u8],
 }
 
 impl<'a> IPv4Header<'a> {
@@ -332,7 +331,6 @@ impl<'a> IPv4Header<'a> {
             source_address,
             destination_address,
             options_and_padding: &[],
-            payload: &[],
         }
     }
 
@@ -365,7 +363,6 @@ impl<'a> IPv4Header<'a> {
                 bytes[16..20].try_into().map_err(parse_eol_error)?,
             ),
             options_and_padding,
-            payload: &bytes[header_len_bytes..],
         })
     }
 
@@ -373,23 +370,17 @@ impl<'a> IPv4Header<'a> {
         self.protocol
     }
 
-    pub fn len(&self) -> u16 {
-        self.header_len.byte_len()
-    }
-
-    pub fn payload(&self) -> &'a [u8] {
-        self.payload
+    pub fn len(&self) -> usize {
+        self.header_len.byte_len() as usize
     }
 
     pub fn source_address(&self) -> Ipv4Addr {
         self.source_address
     }
+}
 
-    pub fn destination_address(&self) -> Ipv4Addr {
-        self.destination_address
-    }
-
-    pub fn write(&self, buffer: &mut [u8]) -> Result<usize, Error> {
+impl<'a> WriteToBuffer for IPv4Header<'a> {
+    fn write_to_buffer(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let mut writer = ChecksummingWriter::new(buffer);
 
         let mut count = 0;
@@ -412,8 +403,6 @@ impl<'a> IPv4Header<'a> {
         buffer[checksum_start] = checksum[0];
         buffer[checksum_start + 1] = checksum[1];
 
-        // count += buffer.write(self.payload)?;
-
         Ok(count)
     }
 }
@@ -421,7 +410,7 @@ impl<'a> IPv4Header<'a> {
 impl Debug for IPv4Header<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IPv4Header")
-            .field("header_len", &self.header_len)
+            .field("len", &self.header_len)
             .field("type_of_service", &self.type_of_service)
             .field("total_length", &self.total_length)
             .field("fragment_details", &self.fragment_details)

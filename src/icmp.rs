@@ -1,5 +1,6 @@
 use crate::arp::ArpTable;
-use crate::common::ChecksummingWriter;
+use crate::common;
+use crate::common::{ChecksummingWriter, WriteToBuffer};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
@@ -261,7 +262,7 @@ impl<'a> ICMPMessage<&'a [u8]> {
 }
 
 impl<T: AsRef<[u8]>> ICMPMessage<T> {
-    pub fn len(&self, caller: &str) -> u16 {
+    pub fn len(&self) -> u16 {
         use ICMPMessageTypes::*;
 
         1 // Type
@@ -311,8 +312,10 @@ impl<T: AsRef<[u8]>> ICMPMessage<T> {
             ParameterProblem(_) => (12u8, 0u8),
         }
     }
+}
 
-    pub fn write(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
+impl<T: AsRef<[u8]>> common::WriteToBuffer for ICMPMessage<T> {
+    fn write_to_buffer(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
         use ICMPMessageTypes::*;
 
         let mut writer = ChecksummingWriter::new(buffer);
@@ -389,7 +392,7 @@ impl<T: AsRef<[u8]>> Debug for ICMPMessage<T> {
             }
         }
 
-        d.field("len()", &(self.len("in debug")));
+        d.field("len()", &(self.len()));
 
         d.finish()
     }

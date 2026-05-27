@@ -10,3 +10,4 @@ bitmatch = { version = "0.1.1" }
 internet-checksum = "0.2.1"
 fastrand = "2.4.1"
 ipnet = { version = "2.12.0", features = ["std"] }
+bytes = { version = "1.11.1" }

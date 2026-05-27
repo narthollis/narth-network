@@ -1,6 +1,6 @@
-use crate::ethernet::{EtherType, EthernetMessage};
-use crate::mac;
+use crate::ethernet::{EtherType, EthernetHeader};
 use crate::mac::{BROADCAST as MAC_BROADCAST, MacAddr};
+use crate::{common, mac};
 use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
@@ -178,15 +178,17 @@ impl ArpMessage {
         }
     }
 
-    pub fn create_ethernet(&'_ self) -> EthernetMessage<'_> {
-        EthernetMessage::new(
+    pub fn create_ethernet(&'_ self) -> EthernetHeader {
+        EthernetHeader::new(
             EtherType::ARP,
             self.sender_hardware_addr,
             self.target_hardware_addr,
         )
     }
+}
 
-    pub fn write(&self, mut buffer: &mut [u8]) -> Result<usize, Error> {
+impl common::WriteToBuffer for ArpMessage {
+    fn write_to_buffer(&self, mut buffer: &mut [u8]) -> Result<usize, Error> {
         use std::io::Write;
 
         let mut count = 0;
