@@ -1,9 +1,11 @@
-use crate::ethernet::{EtherType, EthernetHeader};
-use crate::mac::{BROADCAST as MAC_BROADCAST, MacAddr};
-use crate::{common, mac};
-use std::collections::{HashMap, HashSet};
+use crate::common;
+use crate::common::err_as_eof;
+use crate::protocols::ethernet::mac::{BROADCAST as MAC_BROADCAST, MacAddr};
+use crate::protocols::ethernet::{EtherType, EthernetHeader};
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
+use std::time::Instant;
 
 #[derive(Debug, PartialEq)]
 pub enum HardwareType {
@@ -92,9 +94,6 @@ pub struct ArpMessage {
 fn parse_eol_error(e: std::array::TryFromSliceError) -> Error {
     Error::new(ErrorKind::UnexpectedEof, e)
 }
-fn parse_mac_eol_error(e: mac::TryFromSliceError) -> Error {
-    Error::new(ErrorKind::UnexpectedEof, e)
-}
 fn parse_data_error(message: &str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
 }
@@ -105,6 +104,16 @@ impl ArpMessage {
             operation: Operation::Request,
             sender_hardware_addr: mac,
             sender_protocol_addr: ipv4,
+            target_hardware_addr: MAC_BROADCAST,
+            target_protocol_addr: ipv4,
+        }
+    }
+
+    pub fn request(requester: MacAddr, ipv4: Ipv4Addr) -> Self {
+        ArpMessage {
+            operation: Operation::Request,
+            sender_hardware_addr: requester,
+            sender_protocol_addr: Ipv4Addr::new(0, 0, 0, 0),
             target_hardware_addr: MAC_BROADCAST,
             target_protocol_addr: ipv4,
         }
@@ -154,15 +163,25 @@ impl ArpMessage {
 
         Ok(ArpMessage {
             operation,
-            sender_hardware_addr: bytes[8..14].try_into().map_err(parse_mac_eol_error)?,
+            sender_hardware_addr: bytes[8..14]
+                .try_into()
+                .map_err(err_as_eof("Failed to parse Hardware address"))?,
             sender_protocol_addr,
-            target_hardware_addr: bytes[18..24].try_into().map_err(parse_mac_eol_error)?,
+            target_hardware_addr: bytes[18..24]
+                .try_into()
+                .map_err(err_as_eof("Failed to parse Protocol address"))?,
             target_protocol_addr,
         })
     }
 
-    pub fn destination_mac(&self) -> MacAddr {
+    pub fn operation(&self) -> Operation {
+        self.operation
+    }
+    pub fn target_mac(&self) -> MacAddr {
         self.target_hardware_addr
+    }
+    pub fn target_addr(&self) -> Ipv4Addr {
+        self.target_protocol_addr
     }
     pub fn len(&self) -> usize {
         28
@@ -214,9 +233,42 @@ impl common::WriteToBuffer for ArpMessage {
     }
 }
 
-pub struct ArpTable {
-    table: HashMap<MacAddr, HashSet<Ipv4Addr>>,
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ArpState {
+    /// ARP Request is pending but above timeout, send a new request and let us know
+    /// this is also the initial resolve state if no existing entry is found
+    PendingRetry,
+    /// ARP Request is pending but below timeout, hold your horses
+    PendingWait,
+    /// If Pending wait time exced and max retry exced
+    Timeout,
+    Resolved(MacAddr),
 }
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum ArpTableEntry {
+    Pending {
+        since: Instant,
+        retry_count: u8,
+    },
+    Resolved {
+        last_seen: Instant,
+        address: MacAddr,
+    },
+    // Shares a TTL with Resolved
+    Timeout {
+        since: Instant,
+    },
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct ArpTable {
+    table: HashMap<Ipv4Addr, ArpTableEntry>,
+}
+
+const ARP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+const ARP_REQUEST_MAX_RETRY: u8 = 5;
+const ARP_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl ArpTable {
     pub fn new() -> Self {
@@ -225,19 +277,93 @@ impl ArpTable {
         }
     }
 
-    pub fn handle(
-        &mut self,
-        recv_arp: ArpMessage,
-        our_mac: MacAddr,
-        our_ip: Ipv4Addr,
-    ) -> Result<ArpMessage, Error> {
-        self.table
-            .entry(recv_arp.sender_hardware_addr)
-            .or_default()
-            .insert(recv_arp.sender_protocol_addr);
-
-        Ok(recv_arp.reply(our_mac, our_ip))
+    pub fn update(&mut self, mac: MacAddr, ipv4: Ipv4Addr) {
+        self.table.insert(
+            ipv4,
+            ArpTableEntry::Resolved {
+                last_seen: Instant::now(),
+                address: mac,
+            },
+        );
     }
+
+    pub fn update_from_arp(&mut self, arp: ArpMessage) {
+        self.update(arp.sender_hardware_addr, arp.sender_protocol_addr);
+    }
+
+    pub fn request(&mut self, ipv4addr: Ipv4Addr) -> ArpState {
+        match self
+            .table
+            .entry(ipv4addr)
+            .or_insert(ArpTableEntry::Pending {
+                since: Instant::now(),
+                retry_count: 0,
+            }) {
+            ArpTableEntry::Pending { retry_count, since } => {
+                if since.elapsed() > ARP_REQUEST_TIMEOUT {
+                    if *retry_count >= ARP_REQUEST_MAX_RETRY {
+                        self.table.insert(
+                            ipv4addr,
+                            ArpTableEntry::Timeout {
+                                since: Instant::now(),
+                            },
+                        );
+
+                        ArpState::Timeout
+                    } else {
+                        ArpState::PendingRetry
+                    }
+                } else {
+                    ArpState::PendingWait
+                }
+            }
+            ArpTableEntry::Timeout { since } => {
+                if since.elapsed() > ARP_LIFETIME {
+                    self.table.remove(&ipv4addr);
+                    ArpState::PendingRetry
+                } else {
+                    ArpState::Timeout
+                }
+            }
+            ArpTableEntry::Resolved { last_seen, address } => {
+                if last_seen.elapsed() > ARP_LIFETIME {
+                    self.table.remove(&ipv4addr);
+                    ArpState::PendingRetry
+                } else {
+                    ArpState::Resolved(*address)
+                }
+            }
+        }
+    }
+
+    pub fn can_send_request(&mut self, ipv4addr: Ipv4Addr) -> bool {
+        let now = Instant::now();
+        match self
+            .table
+            .entry(ipv4addr)
+            .and_modify(|mut entry| {
+                if let ArpTableEntry::Pending { retry_count, since } = &mut entry {
+                    *retry_count += 1;
+                    *since = now;
+                }
+            })
+            .or_insert(ArpTableEntry::Pending {
+                since: now,
+                retry_count: 0,
+            }) {
+            ArpTableEntry::Pending { .. } => true,
+            _ => false,
+        }
+    }
+
+    // pub fn handle(&mut self, recv_arp: ArpMessage, our_mac: MacAddr) -> Result<ArpMessage, Error> {
+    //     self.table
+    //         .entry(recv_arp.sender_hardware_addr)
+    //         .or_default()
+    //         .insert(recv_arp.sender_protocol_addr);
+    //
+    //     Ok(recv_arp.reply(our_mac, recv_arp.target_protocol_addr))
+    // }
 
     // let mut count = 0;
     //     count += reply_ether.write(&mut buffer[..])?;

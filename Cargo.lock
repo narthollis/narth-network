@@ -257,6 +257,7 @@ dependencies = [
  "fastrand",
  "internet-checksum",
  "ipnet",
+ "thiserror",
  "tun-rs",
 ]
 

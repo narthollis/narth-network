@@ -11,3 +11,4 @@ internet-checksum = "0.2.1"
 fastrand = "2.4.1"
 ipnet = { version = "2.12.0", features = ["std"] }
 bytes = { version = "1.11.1" }
+thiserror = "2.0.18"

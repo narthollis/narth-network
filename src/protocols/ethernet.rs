@@ -1,5 +1,7 @@
-use crate::common::WriteToBuffer;
-use crate::mac::MacAddr;
+pub mod mac;
+
+use crate::common::{WriteToBuffer, err_as_eof};
+use mac::MacAddr;
 use std::fmt::{Debug, Display, Formatter};
 
 const ETHER_TYPE_IPV4: u16 = 0x0800;
@@ -19,7 +21,7 @@ pub enum EtherType {
 
 impl From<[u8; 2]> for EtherType {
     fn from(val: [u8; 2]) -> EtherType {
-        use crate::ethernet::EtherType::*;
+        use EtherType::*;
 
         let t = u16::from_be_bytes([val[0], val[1]]);
         match t {
@@ -60,7 +62,7 @@ impl From<EtherType> for [u8; 2] {
 
 impl Display for EtherType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        use crate::ethernet::EtherType::*;
+        use EtherType::*;
 
         let r = match self {
             Ieee8023LengthField(val) => format!("Len({})", val),
@@ -174,17 +176,5 @@ impl Debug for EthernetHeader {
             .field("ether_type", &self.ether_type)
             .field("vlan", &self.vlan)
             .finish()
-    }
-}
-
-fn err_as_eof<T>(message: &str) -> impl Fn(T) -> std::io::Error
-where
-    T: std::error::Error,
-{
-    move |e| {
-        std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            format!("{}: {}", message, e),
-        )
     }
 }

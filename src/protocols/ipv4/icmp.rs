@@ -1,6 +1,6 @@
-use crate::arp::ArpTable;
 use crate::common;
-use crate::common::{ChecksummingWriter, WriteToBuffer};
+use crate::common::ChecksummingWriter;
+use crate::protocols::arp::ArpTable;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;

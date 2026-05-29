@@ -1,20 +1,9 @@
-#![feature(oneshot_channel)]
-
-mod arp;
-mod common;
-mod ethernet;
-mod icmp;
-mod interface;
-mod ipv4;
-mod mac;
-
-use crate::interface::Network;
-use crate::mac::MacAddr;
-use ipnet::Ipv4Net;
-use std::net::Ipv4Addr;
+use narth_net::protocols::ethernet::mac::MacAddr;
+use narth_net::runtime::network::Network;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::thread;
-use std::thread::sleep;
 use std::time::Duration;
+use tun_rs::SyncDevice;
 
 const MTU: u16 = 1500;
 
@@ -25,25 +14,100 @@ const IPV4_HOST: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 2);
 const IPV4_NETWORK_PREFIX: u8 = 24;
 
 fn main() -> std::io::Result<()> {
-    let mut network = Network::new(
-        MAC_HOST,
-        Ipv4Net::new(IPV4_HOST, IPV4_NETWORK_PREFIX).unwrap(),
-        MTU as usize,
-    )
-    .expect("Failed to build network interface");
+    let tap = Tap(tun_rs::DeviceBuilder::new()
+        .name("narth%d")
+        .layer(tun_rs::Layer::L2)
+        .mac_addr(MAC_HOST.octets())
+        .mtu(MTU)
+        .ipv4(IPV4_HOST, IPV4_NETWORK_PREFIX, None)
+        //.ipv6()
+        .packet_information(false)
+        .build_sync()?);
+    tap.0.set_nonblocking(true)?;
+    println!("created tun device: {}", tap.0.name()?);
 
-    let wait = match std::env::args().any(|a| a == "--wait") {
-        true => Some(Duration::from_secs(10)),
-        false => None,
-    };
+    let mut network = Network::new(tap);
 
-    let mut iface1 = network.add_interface(MAC_OURS, IPV4_OURS)?;
+    let interface = network.add_interface(MAC_OURS)?;
 
-    let iface1_jh = thread::spawn(move || iface1.execute());
+    // TODO make it so i can add / remove interfaces after starting...
+    let jh = thread::spawn(move || network.run());
 
-    network.execute(wait)?;
+    if std::env::args().any(|a| a == "--wait") {
+        std::thread::sleep(Duration::from_secs(10));
+    }
 
-    let _ = iface1_jh.join();
+    let inst = std::time::Instant::now();
+
+    println!(
+        "{:?} Trying to add IPv4 address matching host ({})...",
+        inst.elapsed(),
+        IPV4_HOST
+    );
+    if let Err(e) = interface.add_ipv4_address(IPV4_HOST) {
+        eprintln!(
+            "\x1b[31m{:?} Failed to add ipv4 address ({}): {}\x1b[0m",
+            inst.elapsed(),
+            IPV4_HOST,
+            e
+        );
+    }
+
+    println!(
+        "{:?} Trying to add IPv4 other address ({})...",
+        inst.elapsed(),
+        IPV4_OURS
+    );
+    if let Ok(()) = interface.add_ipv4_address(IPV4_OURS) {
+        println!("{:?} Added ipv4 address {}", inst.elapsed(), IPV4_OURS);
+    }
+
+    jh.join().expect("Failed to join network thread");
 
     Ok(())
+}
+
+struct Tap(SyncDevice);
+impl narth_net::runtime::NetworkBridge for Tap {
+    type Error = std::io::Error;
+
+    fn mtu(&self) -> usize {
+        self.0.mtu().unwrap_or(MTU) as usize
+    }
+
+    fn mac_addr(&self) -> MacAddr {
+        self.0.mac_address().map(|x| x.into()).unwrap_or(MAC_HOST)
+    }
+
+    fn ipv4_addresses(&self) -> std::io::Result<impl IntoIterator<Item = Ipv4Addr>> {
+        Ok(self
+            .0
+            .addresses()?
+            .into_iter()
+            .filter_map(|x| match x {
+                IpAddr::V4(a) => Some(a),
+                _ => None,
+            })
+            .collect::<Vec<_>>())
+    }
+
+    fn ipv6_addresses(&self) -> std::io::Result<impl IntoIterator<Item = Ipv6Addr>> {
+        Ok(self
+            .0
+            .addresses()?
+            .into_iter()
+            .filter_map(|x| match x {
+                IpAddr::V6(a) => Some(a),
+                _ => None,
+            })
+            .collect::<Vec<_>>())
+    }
+
+    fn send(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0.send(data)
+    }
+
+    fn recv(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.0.recv(buffer)
+    }
 }

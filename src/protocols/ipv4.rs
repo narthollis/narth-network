@@ -1,3 +1,5 @@
+pub mod icmp;
+
 use crate::common::{ChecksummingWriter, WriteToBuffer};
 use bitmatch::bitmatch;
 use std::fmt::{Debug, Formatter};
@@ -376,6 +378,9 @@ impl<'a> IPv4Header<'a> {
 
     pub fn source_address(&self) -> Ipv4Addr {
         self.source_address
+    }
+    pub fn destination_address(&self) -> Ipv4Addr {
+        self.destination_address
     }
 }
 
