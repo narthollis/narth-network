@@ -1,10 +1,6 @@
 use crate::common;
-use crate::common::ChecksummingWriter;
-use crate::protocols::arp::ArpTable;
-use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
-use tun_rs::SyncDevice;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum DestinationUnreachableCode {
@@ -315,37 +311,44 @@ impl<T: AsRef<[u8]>> ICMPMessage<T> {
 }
 
 impl<T: AsRef<[u8]>> common::WriteToBuffer for ICMPMessage<T> {
-    fn write_to_buffer(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        use ICMPMessageTypes::*;
+    fn encoded_length(&self) -> usize {
+        self.len() as usize
+    }
 
-        let mut writer = ChecksummingWriter::new(buffer);
+    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+        use ICMPMessageTypes::*;
+        use bytes::BufMut;
+
+        let mut packet = bytes::BytesMut::with_capacity(self.len() as usize);
 
         let (icmp_type, code) = self.type_and_code_u8();
 
-        let mut count = 0;
-        count += writer.write(&[icmp_type, code])?;
-        let checksum_start = count;
-        count += writer.write(&[0, 0])?;
+        packet.put_u8(icmp_type);
+        packet.put_u8(code);
 
-        count += match &self.message {
+        packet.put_u16(0x0000);
+
+        match &self.message {
             Echo(m) | EchoReply(m) => {
-                writer.write(&m.identifier.to_be_bytes())?
-                    + writer.write(&m.sequence_number.to_be_bytes())?
-                    + writer.write(m.data.as_ref())?
+                packet.put_u16(m.identifier);
+                packet.put_u16(m.sequence_number);
+                packet.put_slice(m.data.as_ref());
             }
-            DestinationUnreachable(m) => writer.write(m.data.as_ref())?,
-            SourceQuench(data) => writer.write(data.as_ref())?,
-            Redirect(m) => writer.write(m.data.as_ref())?,
-            TimeExceeded(m) => writer.write(m.data.as_ref())?,
-            ParameterProblem(m) => writer.write(m.data.as_ref())?,
+            DestinationUnreachable(m) => packet.put_slice(m.data.as_ref()),
+            SourceQuench(data) => packet.put_slice(data.as_ref()),
+            Redirect(m) => packet.put_slice(m.data.as_ref()),
+            TimeExceeded(m) => packet.put_slice(m.data.as_ref()),
+            ParameterProblem(m) => packet.put_slice(m.data.as_ref()),
         };
 
-        let checksum = writer.checksum();
+        let mut checksum = internet_checksum::Checksum::new();
+        checksum.add_bytes(&packet);
+        let checksum = checksum.checksum();
 
-        buffer[checksum_start] = checksum[0];
-        buffer[checksum_start + 1] = checksum[1];
+        packet[2] = checksum[0];
+        packet[3] = checksum[1];
 
-        Ok(count)
+        buffer.put_slice(&packet);
     }
 }
 
@@ -395,57 +398,5 @@ impl<T: AsRef<[u8]>> Debug for ICMPMessage<T> {
         d.field("len()", &(self.len()));
 
         d.finish()
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Hash)]
-struct EchoSequence {
-    target: Ipv4Addr,
-    current: u16,
-    limit: u16,
-    last: Option<std::time::Instant>,
-    delay: std::time::Duration,
-}
-
-#[derive(Debug, Default)]
-struct EchoTracker {
-    sequences: HashMap<u16, EchoSequence>,
-}
-
-impl EchoTracker {
-    pub fn ping(&mut self, target: Ipv4Addr, count: u16, delay: std::time::Duration) {
-        let identifier = fastrand::u16(..);
-
-        assert!(delay.as_secs() > 1);
-
-        self.sequences.insert(
-            identifier,
-            EchoSequence {
-                target,
-                current: 0,
-                limit: count,
-                last: None,
-                delay,
-            },
-        );
-    }
-
-    pub fn send(&mut self, arp: ArpTable, iface: &SyncDevice) {
-        todo!()
-        // for (identifier, seq) in self.sequences.iter_mut() {
-        //    if match seq.last {
-        //         Some(last) => last.elapsed() >= seq.delay,
-        //         None => true,
-        //     } {
-        //
-        //        let echo = ICMPMessage::new_echo_request(Some(*identifier), seq.current + 1);
-        //        let ipv4 =
-        //    }
-        //
-        // }
-    }
-
-    pub fn handle(&self, message: ICMPMessage<&[u8]>) {
-        todo!()
     }
 }

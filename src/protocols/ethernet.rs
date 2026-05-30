@@ -46,7 +46,7 @@ impl TryFrom<&[u8]> for EtherType {
     }
 }
 
-impl From<EtherType> for [u8; 2] {
+impl From<EtherType> for u16 {
     fn from(value: EtherType) -> Self {
         match value {
             EtherType::Ieee8023LengthField(v) => v.clone(),
@@ -56,7 +56,6 @@ impl From<EtherType> for [u8; 2] {
             EtherType::IPv6 => ETHER_TYPE_IPV6,
             EtherType::Other(v) => v.clone(),
         }
-        .to_be_bytes()
     }
 }
 
@@ -148,23 +147,20 @@ impl EthernetHeader {
 }
 
 impl WriteToBuffer for EthernetHeader {
-    fn write_to_buffer(&self, mut buffer: &mut [u8]) -> std::io::Result<usize> {
-        use std::io::Write;
+    fn encoded_length(&self) -> usize {
+        self.len()
+    }
 
-        let mut count = 0;
-
-        count += buffer.write(&self.destination_address.octets())?;
-        count += buffer.write(&self.source_address.octets())?;
+    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+        buffer.put_slice(&self.destination_address.octets());
+        buffer.put_slice(&self.source_address.octets());
 
         if let Some(vlan) = self.vlan {
-            count += buffer.write(&ETHER_TYPE_VLAN.to_be_bytes())?;
-            count += buffer.write(&vlan.to_be_bytes())?;
+            buffer.put_u16(ETHER_TYPE_VLAN);
+            buffer.put_u16(vlan);
         }
 
-        let ether_type: [u8; 2] = self.ether_type.into();
-        count += buffer.write(&ether_type)?;
-
-        Ok(count)
+        buffer.put_u16(self.ether_type.into());
     }
 }
 

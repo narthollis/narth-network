@@ -44,7 +44,7 @@ fn main() -> std::io::Result<()> {
         inst.elapsed(),
         IPV4_HOST
     );
-    if let Err(e) = interface.add_ipv4_address(IPV4_HOST) {
+    if let Err(e) = interface.add_ipv4_address(IPV4_HOST, IPV4_NETWORK_PREFIX) {
         eprintln!(
             "\x1b[31m{:?} Failed to add ipv4 address ({}): {}\x1b[0m",
             inst.elapsed(),
@@ -58,8 +58,16 @@ fn main() -> std::io::Result<()> {
         inst.elapsed(),
         IPV4_OURS
     );
-    if let Ok(()) = interface.add_ipv4_address(IPV4_OURS) {
+    if let Ok(()) = interface.add_ipv4_address(IPV4_OURS, IPV4_NETWORK_PREFIX) {
         println!("{:?} Added ipv4 address {}", inst.elapsed(), IPV4_OURS);
+    }
+
+    if let Err(err) = interface.ping(IPV4_HOST, Some(4), None) {
+        println!("{:?} Failed to ping: {}", inst.elapsed(), err);
+    }
+
+    if let Err(err) = interface.ping(Ipv4Addr::from_octets([192, 168, 174, 108]), Some(4), None) {
+        println!("{:?} Failed to ping: {}", inst.elapsed(), err);
     }
 
     jh.join().expect("Failed to join network thread");

@@ -1,9 +1,12 @@
 use crate::protocols::ethernet::mac::MacAddr;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+mod address_table;
 pub(in crate::runtime) mod common;
 pub mod interface;
 pub mod network;
+mod ping;
+mod route_table;
 
 pub trait NetworkBridge {
     type Error: core::fmt::Debug;

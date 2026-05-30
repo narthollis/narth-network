@@ -20,13 +20,14 @@ impl From<[u8; 2]> for HardwareType {
         }
     }
 }
-impl From<HardwareType> for [u8; 2] {
+
+impl From<HardwareType> for u16 {
     fn from(value: HardwareType) -> Self {
         use HardwareType::*;
 
         match value {
-            Ethernet => [0x00, 0x01],
-            Other(v) => v.to_be_bytes(),
+            Ethernet => 0x0001,
+            Other(v) => v,
         }
     }
 }
@@ -45,12 +46,12 @@ impl From<[u8; 2]> for ProtocolType {
         }
     }
 }
-impl From<ProtocolType> for [u8; 2] {
+impl From<ProtocolType> for u16 {
     fn from(value: ProtocolType) -> Self {
         use ProtocolType::*;
         match value {
-            IPv4 => [0x08, 0x00],
-            Other(v) => v.to_be_bytes(),
+            IPv4 => 0x0800,
+            Other(v) => v,
         }
     }
 }
@@ -59,25 +60,25 @@ impl From<ProtocolType> for [u8; 2] {
 pub enum Operation {
     Request,
     Reply,
-    Unknown(u16),
 }
 
-impl From<[u8; 2]> for Operation {
-    fn from(v: [u8; 2]) -> Self {
+impl TryFrom<[u8; 2]> for Operation {
+    type Error = Error;
+
+    fn try_from(v: [u8; 2]) -> Result<Self, Self::Error> {
         match v {
-            [0x00, 0x01] => Operation::Request,
-            [0x00, 0x02] => Operation::Reply,
-            _ => Operation::Unknown(u16::from_be_bytes(v)),
+            [0x00, 0x01] => Ok(Operation::Request),
+            [0x00, 0x02] => Ok(Operation::Reply),
+            _ => Err(Error::new(ErrorKind::InvalidData, "invalid arp operation")),
         }
     }
 }
-impl From<Operation> for [u8; 2] {
+impl From<Operation> for u16 {
     fn from(value: Operation) -> Self {
         use Operation::*;
         match value {
-            Request => [0x00, 0x01],
-            Reply => [0x00, 0x02],
-            Unknown(v) => v.to_be_bytes(),
+            Request => 0x0001,
+            Reply => 0x0002,
         }
     }
 }
@@ -146,12 +147,7 @@ impl ArpMessage {
 
         // We only handle Request and Reply
         let operation_raw: [u8; 2] = bytes[6..8].try_into().map_err(parse_eol_error)?;
-        let operation: Operation = operation_raw.into();
-        if let Operation::Unknown(op) = operation {
-            return Err(parse_data_error(
-                format!("Unknown operation {:2x}", op).as_str(),
-            ));
-        }
+        let operation: Operation = operation_raw.try_into()?;
 
         let sender_protocol_addr_raw: [u8; 4] =
             bytes[14..18].try_into().map_err(parse_eol_error)?;
@@ -183,6 +179,13 @@ impl ArpMessage {
     pub fn target_addr(&self) -> Ipv4Addr {
         self.target_protocol_addr
     }
+    pub fn source_mac(&self) -> MacAddr {
+        self.sender_hardware_addr
+    }
+    pub fn source_addr(&self) -> Ipv4Addr {
+        self.sender_protocol_addr
+    }
+
     pub fn len(&self) -> usize {
         28
     }
@@ -207,29 +210,24 @@ impl ArpMessage {
 }
 
 impl common::WriteToBuffer for ArpMessage {
-    fn write_to_buffer(&self, mut buffer: &mut [u8]) -> Result<usize, Error> {
-        use std::io::Write;
+    fn encoded_length(&self) -> usize {
+        28
+    }
 
-        let mut count = 0;
-
-        let hardware_type: [u8; 2] = HardwareType::Ethernet.into();
-        count += buffer.write(&hardware_type)?;
-
-        let protocol_type: [u8; 2] = ProtocolType::IPv4.into();
-        count += buffer.write(&protocol_type)?;
+    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+        buffer.put_u16(HardwareType::Ethernet.into());
+        buffer.put_u16(ProtocolType::IPv4.into());
 
         // Ethernet and IPv4 addresses fixed length
-        count += buffer.write(&[6u8, 4u8])?;
+        buffer.put_u8(0x06);
+        buffer.put_u8(0x04);
 
-        let operation: [u8; 2] = self.operation.into();
-        count += buffer.write(&operation)?;
+        buffer.put_u16(self.operation.into());
 
-        count += buffer.write(&self.sender_hardware_addr.octets())?;
-        count += buffer.write(&self.sender_protocol_addr.octets())?;
-        count += buffer.write(&self.target_hardware_addr.octets())?;
-        count += buffer.write(&self.target_protocol_addr.octets())?;
-
-        Ok(count)
+        buffer.put_slice(&self.sender_hardware_addr.octets());
+        buffer.put_slice(&self.sender_protocol_addr.octets());
+        buffer.put_slice(&self.target_hardware_addr.octets());
+        buffer.put_slice(&self.target_protocol_addr.octets());
     }
 }
 
@@ -277,7 +275,7 @@ impl ArpTable {
         }
     }
 
-    pub fn update(&mut self, mac: MacAddr, ipv4: Ipv4Addr) {
+    pub fn update_or_insert(&mut self, mac: MacAddr, ipv4: Ipv4Addr) {
         self.table.insert(
             ipv4,
             ArpTableEntry::Resolved {
@@ -287,8 +285,21 @@ impl ArpTable {
         );
     }
 
-    pub fn update_from_arp(&mut self, arp: ArpMessage) {
-        self.update(arp.sender_hardware_addr, arp.sender_protocol_addr);
+    pub fn update_only(&mut self, mac: MacAddr, ipv4: Ipv4Addr) -> bool {
+        match self.table.entry(ipv4) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(ArpTableEntry::Resolved {
+                    last_seen: Instant::now(),
+                    address: mac,
+                });
+                true
+            }
+            std::collections::hash_map::Entry::Vacant(_) => false,
+        }
+    }
+
+    pub fn insert_from_arp(&mut self, arp: &ArpMessage) {
+        self.update_or_insert(arp.sender_hardware_addr, arp.sender_protocol_addr);
     }
 
     pub fn request(&mut self, ipv4addr: Ipv4Addr) -> ArpState {

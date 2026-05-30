@@ -1,7 +1,8 @@
 pub mod icmp;
 
-use crate::common::{ChecksummingWriter, WriteToBuffer};
+use crate::common::WriteToBuffer;
 use bitmatch::bitmatch;
+use bytes::BufMut;
 use std::fmt::{Debug, Formatter};
 use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
@@ -158,15 +159,17 @@ impl TypeOfService {
             high_reliability: Self::parse_high_reliability(input),
         }
     }
+}
 
+impl From<TypeOfService> for u8 {
     #[bitmatch]
-    fn to_bytes(self) -> [u8; 1] {
-        let a: u8 = self.precedence.into();
-        let b = self.low_delay;
-        let c = self.high_throughput;
-        let d = self.high_reliability;
+    fn from(value: TypeOfService) -> Self {
+        let a: u8 = value.precedence.into();
+        let b = value.low_delay;
+        let c = value.high_throughput;
+        let d = value.high_reliability;
 
-        [bitpack!("aaab_cd00")]
+        bitpack!("aaab_cd00")
     }
 }
 
@@ -224,10 +227,15 @@ impl FragmentDetails {
             offset,
         }
     }
+}
 
-    #[bitmatch]
-    fn to_bytes(self) -> [u8; 4] {
-        let id = self.identification.to_be_bytes();
+impl WriteToBuffer for FragmentDetails {
+    fn encoded_length(&self) -> usize {
+        4
+    }
+
+    fn write_to_buffer<B: BufMut>(&self, buffer: &mut B) {
+        buffer.put_u16(self.identification);
 
         let mut raw = 0u16;
         if self.do_not_fragment {
@@ -236,10 +244,8 @@ impl FragmentDetails {
         if self.more_fragments {
             raw |= 1 << 13
         }
-        raw |= self.offset & Self::OFFSET_MAX;
-        let packed = raw.to_be_bytes();
-
-        [id[0], id[1], packed[0], packed[1]]
+        raw |= self.offset & FragmentDetails::OFFSET_MAX;
+        buffer.put_u16(raw);
     }
 }
 
@@ -287,8 +293,8 @@ impl From<IPProtocolTypes> for u8 {
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |                    Options                    |    Padding    |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-#[derive(Eq, PartialEq, Copy, Clone)]
-pub struct IPv4Header<'a> {
+#[derive(Eq, PartialEq, Clone)]
+pub struct IPv4Header {
     // const Version = 4
     header_len: IPv4HeaderLengthWords,
     type_of_service: TypeOfService,
@@ -300,10 +306,10 @@ pub struct IPv4Header<'a> {
     header_checksum: u16,
     source_address: Ipv4Addr,
     destination_address: Ipv4Addr,
-    options_and_padding: &'a [u8],
+    options_and_padding: bytes::Bytes,
 }
 
-impl<'a> IPv4Header<'a> {
+impl IPv4Header {
     pub fn new(
         protocol: IPProtocolTypes,
         source_address: Ipv4Addr,
@@ -332,11 +338,11 @@ impl<'a> IPv4Header<'a> {
             header_checksum: 0, // Will compute on write
             source_address,
             destination_address,
-            options_and_padding: &[],
+            options_and_padding: bytes::Bytes::new(),
         }
     }
 
-    pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, Error> {
+    pub fn from_bytes(bytes: &bytes::Bytes) -> Result<Self, Error> {
         let version = (bytes[0] & 0xf0) >> 4;
         if version != 4 {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid IPv4 version"));
@@ -346,7 +352,7 @@ impl<'a> IPv4Header<'a> {
 
         let header_len: IPv4HeaderLengthWords = bytes[0].into();
         let header_len_bytes = header_len.byte_len() as usize;
-        let options_and_padding: &'a [u8] = &bytes[20..header_len_bytes];
+        let options_and_padding = bytes.slice(20..header_len_bytes);
 
         Ok(IPv4Header {
             header_len,
@@ -384,35 +390,42 @@ impl<'a> IPv4Header<'a> {
     }
 }
 
-impl<'a> WriteToBuffer for IPv4Header<'a> {
-    fn write_to_buffer(&self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let mut writer = ChecksummingWriter::new(buffer);
+impl WriteToBuffer for IPv4Header {
+    fn encoded_length(&self) -> usize {
+        self.len()
+    }
 
-        let mut count = 0;
-        count += writer.write(&[self.header_len.to_byte(4u8)])?;
-        count += writer.write(&self.type_of_service.to_bytes())?;
-        count += writer.write(&self.total_length.to_be_bytes())?;
-        count += writer.write(&self.fragment_details.to_bytes())?;
-        count += writer.write(&[self.time_to_live, self.protocol.into()])?;
-        let checksum_start = count;
-        // Checksum needs to be 0 initially, then we compute the checksum, then replace it
-        count += writer.write(&[0, 0])?;
-        count += writer.write(&self.source_address.octets())?;
-        count += writer.write(&self.destination_address.octets())?;
+    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+        use bytes::BufMut;
+        // Assert we are only dealing with an option free IPv4 header
+        assert_eq!(self.header_len.0, 5);
+        let mut header_bytes = [0u8; 20];
+        let mut cursor = &mut header_bytes[..];
+        cursor.put_u8(self.header_len.to_byte(4u8));
+        cursor.put_u8(self.type_of_service.into());
+        cursor.put_u16(self.total_length);
+        self.fragment_details.write_to_buffer(&mut cursor);
+        cursor.put_u8(self.time_to_live);
+        cursor.put_u8(self.protocol.into());
+        cursor.put_u16(0x0000);
+        cursor.put_slice(&self.source_address.octets());
+        cursor.put_slice(&self.destination_address.octets());
 
-        count += writer.write(self.options_and_padding)?;
+        // If we chose to do options then this but nope.
+        // cursor.put_slice(&self.options_and_padding);
 
-        // Compute and update the checksum
-        let checksum = writer.checksum();
+        let mut checksum = internet_checksum::Checksum::new();
+        checksum.add_bytes(&header_bytes);
+        let checksum = checksum.checksum();
 
-        buffer[checksum_start] = checksum[0];
-        buffer[checksum_start + 1] = checksum[1];
+        header_bytes[10] = checksum[0];
+        header_bytes[11] = checksum[1];
 
-        Ok(count)
+        buffer.put_slice(&header_bytes);
     }
 }
 
-impl Debug for IPv4Header<'_> {
+impl Debug for IPv4Header {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IPv4Header")
             .field("len", &self.header_len)
@@ -453,4 +466,19 @@ impl Debug for IPv4Header<'_> {
 // }
 fn parse_eol_error(e: std::array::TryFromSliceError) -> Error {
     Error::new(ErrorKind::UnexpectedEof, e)
+}
+
+pub fn prefix_to_mask(prefix: u8) -> Ipv4Addr {
+    assert!(prefix <= 32, "Prefix must be between 0 and 32");
+    let mask_u32 = if prefix == 0 {
+        // edge case - rust panics if you try to bitshift by the full width
+        0
+    } else {
+        // 1) !0u32 -> 0xFFFFFFFF
+        // 2) Shift left by host length (32 - prefix)
+        //    SO for /24 you have 8 host length, so shift to the left by 8 leaving us with 0xFFFFFF00
+        !0u32 << (32 - prefix)
+    };
+
+    Ipv4Addr::from(mask_u32)
 }
