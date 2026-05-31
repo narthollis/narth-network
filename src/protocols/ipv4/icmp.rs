@@ -1,9 +1,13 @@
 use crate::common;
+use crate::common::WriteToBuffer;
+use crate::protocols::ipv4::IPv4Header;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
 
+pub const ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH: usize = 64 / (u8::BITS as usize);
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum DestinationUnreachableCode {
+pub enum DestinationUnreachableCode {
     NetUnreachable,
     HostUnreachable,
     ProtocolUnreachable,
@@ -47,10 +51,45 @@ impl From<DestinationUnreachableCode> for u8 {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct DestinationUnreachableMessage<T> {
-    code: DestinationUnreachableCode,
-    data: T,
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct DestinationUnreachableMessage {
+    pub code: DestinationUnreachableCode,
+    pub ipv4header: IPv4Header,
+    pub datagram: bytes::Bytes,
+}
+
+impl TryFrom<(u8, bytes::Bytes)> for DestinationUnreachableMessage {
+    type Error = std::io::Error;
+
+    fn try_from((code, bytes): (u8, bytes::Bytes)) -> Result<Self, Self::Error> {
+        let ipv4header = IPv4Header::from_bytes(&bytes).map_err(|e| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "ICMP Payload truncated parsing IPv4 Header",
+            ),
+            _ => std::io::Error::new(
+                e.kind(),
+                format!("ICMP Payload IPv4 Header Parse Failed: {}", e),
+            ),
+        })?;
+
+        let header_len = ipv4header.encoded_length();
+        if bytes.len() < header_len + ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "ICMP Payload truncated, missing or truncated datagram start",
+            ));
+        }
+
+        let datagram_start =
+            bytes.slice(header_len..header_len + ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH);
+
+        Ok(DestinationUnreachableMessage {
+            ipv4header,
+            datagram: datagram_start,
+            code: code.try_into()?,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -84,16 +123,16 @@ impl From<TimeExceededCode> for u8 {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct TimeExceededMessage<T> {
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct TimeExceededMessage {
     code: TimeExceededCode,
-    data: T,
+    data: bytes::Bytes,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct ParameterProblemMessage<T> {
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct ParameterProblemMessage {
     pointer: u8,
-    data: T,
+    data: bytes::Bytes,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -131,52 +170,54 @@ impl From<RedirectMessageCode> for u8 {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct RedirectMessage<T> {
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct RedirectMessage {
     code: RedirectMessageCode,
     gateway: Ipv4Addr,
-    data: T,
+    data: bytes::Bytes,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct EchoMessage<T> {
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct EchoMessage {
     identifier: u16,
     sequence_number: u16,
-    data: T,
+    data: bytes::Bytes,
 }
 
-impl<'a> TryFrom<&'a [u8]> for EchoMessage<&'a [u8]> {
+impl TryFrom<&bytes::Bytes> for EchoMessage {
     type Error = std::io::Error;
 
-    fn try_from(bytes: &'a [u8]) -> Result<Self, Self::Error> {
+    fn try_from(bytes: &bytes::Bytes) -> Result<Self, Self::Error> {
         Ok(EchoMessage {
             identifier: u16::from_be_bytes([bytes[4], bytes[5]]),
             sequence_number: u16::from_be_bytes([bytes[6], bytes[7]]),
-            data: &bytes[8..],
+            data: bytes.slice(8..),
         })
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum ICMPMessageTypes<T> {
-    EchoReply(EchoMessage<T>),
-    DestinationUnreachable(DestinationUnreachableMessage<T>),
-    SourceQuench(T),
-    Redirect(RedirectMessage<T>),
-    Echo(EchoMessage<T>),
-    TimeExceeded(TimeExceededMessage<T>),
-    ParameterProblem(ParameterProblemMessage<T>),
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ICMPMessageTypes {
+    EchoReply(EchoMessage),
+    DestinationUnreachable(DestinationUnreachableMessage),
+    SourceQuench(bytes::Bytes),
+    Redirect(RedirectMessage),
+    Echo(EchoMessage),
+    TimeExceeded(TimeExceededMessage),
+    ParameterProblem(ParameterProblemMessage),
     // TODO the rest
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub struct ICMPMessage<T> {
+#[derive(PartialEq, Eq, Clone)]
+pub struct ICMPMessage {
     checksum: [u8; 2],
-    pub message: ICMPMessageTypes<T>,
+    pub message: ICMPMessageTypes,
 }
 
-impl ICMPMessage<Vec<u8>> {
-    pub fn new_echo_request(identifier: Option<u16>, sequence: u16) -> ICMPMessage<Vec<u8>> {
+impl ICMPMessage {
+    pub fn new_echo_request(identifier: Option<u16>, sequence: u16) -> ICMPMessage {
+        use bytes::BufMut;
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
@@ -184,14 +225,15 @@ impl ICMPMessage<Vec<u8>> {
         let sec = now.as_secs().to_ne_bytes();
         let usec = (now.subsec_micros() as u64).to_ne_bytes();
 
-        let mut data = vec![0u8; 56];
-        data[..8].copy_from_slice(&sec);
-        data[8..16].copy_from_slice(&usec);
+        let mut data = bytes::BytesMut::with_capacity(56);
+        data.put_u64_ne(now.as_secs());
+        data.put_u64_ne(now.subsec_micros() as u64);
 
         let padding_start = sec.len() + usec.len();
         for (i, v) in data[padding_start..].iter_mut().enumerate() {
             *v = i as u8;
         }
+        let data = data.freeze();
 
         ICMPMessage {
             checksum: [0, 0],
@@ -202,30 +244,28 @@ impl ICMPMessage<Vec<u8>> {
             }),
         }
     }
-}
 
-impl<'a> ICMPMessage<&'a [u8]> {
-    pub fn echo_reply(original: &'a EchoMessage<&'a [u8]>) -> Self {
+    pub fn echo_reply(original: &EchoMessage) -> Self {
         ICMPMessage {
             checksum: [0, 0],
-            message: ICMPMessageTypes::EchoReply(*original),
+            message: ICMPMessageTypes::EchoReply(original.clone()),
         }
     }
 
-    pub fn from_bytes(bytes: &'a [u8]) -> std::io::Result<Self> {
+    pub fn from_bytes(bytes: &bytes::Bytes) -> std::io::Result<Self> {
         use ICMPMessageTypes::*;
-
-        let code = bytes[1];
 
         // TODO Compute and validate checksum
 
+        let checksum: [u8; 2] = [bytes[2], bytes[3]];
+
+        let code = bytes[1];
+        let data = bytes.slice(8..);
+
         let message = match bytes[0] {
             0 => Ok(EchoReply(bytes.try_into()?)),
-            3 => Ok(DestinationUnreachable(DestinationUnreachableMessage {
-                code: code.try_into()?,
-                data: &bytes[8..],
-            })),
-            4 => Ok(SourceQuench(&bytes[8..])),
+            3 => Ok(DestinationUnreachable((code, data).try_into()?)),
+            4 => Ok(SourceQuench(bytes.slice(8..))),
             5 => Ok(Redirect(RedirectMessage {
                 code: code.try_into()?,
                 gateway: Ipv4Addr::from_octets(
@@ -233,16 +273,16 @@ impl<'a> ICMPMessage<&'a [u8]> {
                         .try_into()
                         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
                 ),
-                data: &bytes[8..],
+                data: bytes.slice(8..),
             })),
             8 => Ok(Echo(bytes.try_into()?)),
             11 => Ok(TimeExceeded(TimeExceededMessage {
                 code: code.try_into()?,
-                data: &bytes[8..],
+                data: bytes.slice(8..),
             })),
             12 => Ok(ParameterProblem(ParameterProblemMessage {
                 pointer: bytes[5],
-                data: &bytes[8..],
+                data: bytes.slice(8..),
             })),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -250,50 +290,7 @@ impl<'a> ICMPMessage<&'a [u8]> {
             )),
         }?;
 
-        Ok(ICMPMessage {
-            checksum: [bytes[2], bytes[3]],
-            message,
-        })
-    }
-}
-
-impl<T: AsRef<[u8]>> ICMPMessage<T> {
-    pub fn len(&self) -> u16 {
-        use ICMPMessageTypes::*;
-
-        1 // Type
-            + 1 // Code
-            + 2 // Checksum
-            + match &self.message {
-            EchoReply(m) | Echo(m) => {
-                2 // Identifier
-                    + 2 // Sequence
-                    + m.data.as_ref().len() as u16
-            }
-            DestinationUnreachable(m) => {
-                4 // Reserved
-                    + m.data.as_ref().len() as u16
-            }
-            SourceQuench(m) => {
-                4 // Reserved
-                    + m.as_ref().len() as u16
-            }
-            // 4=gateway address + data length
-            Redirect(m) => {
-                4 // Reserved
-                    + m.data.as_ref().len() as u16
-            }
-            // 4=reserved + data length
-            TimeExceeded(m) => {
-                4 // Reserved
-                    + m.data.as_ref().len() as u16
-            }
-            ParameterProblem(m) => {
-                1 // Pointer
-                    + 3 // Reserved
-                    + m.data.as_ref().len() as u16
-            }
-        }
+        Ok(ICMPMessage { checksum, message })
     }
 
     fn type_and_code_u8(&self) -> (u8, u8) {
@@ -310,16 +307,51 @@ impl<T: AsRef<[u8]>> ICMPMessage<T> {
     }
 }
 
-impl<T: AsRef<[u8]>> common::WriteToBuffer for ICMPMessage<T> {
+impl common::WriteToBuffer for ICMPMessage {
     fn encoded_length(&self) -> usize {
-        self.len() as usize
+        use ICMPMessageTypes::*;
+
+        1 // Type
+            + 1 // Code
+            + 2 // Checksum
+            + match &self.message {
+            EchoReply(m) | Echo(m) => {
+                2 // Identifier
+                    + 2 // Sequence
+                    + m.data.as_ref().len()
+            }
+            DestinationUnreachable(m) => {
+                4 // Reserved
+                    + m.ipv4header.encoded_length()
+                    + m.datagram.len()
+            }
+            SourceQuench(m) => {
+                4 // Reserved
+                    + m.as_ref().len()
+            }
+            // 4=gateway address + data length
+            Redirect(m) => {
+                4 // Reserved
+                    + m.data.as_ref().len()
+            }
+            // 4=reserved + data length
+            TimeExceeded(m) => {
+                4 // Reserved
+                    + m.data.as_ref().len()
+            }
+            ParameterProblem(m) => {
+                1 // Pointer
+                    + 3 // Reserved
+                    + m.data.as_ref().len()
+            }
+        }
     }
 
     fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
         use ICMPMessageTypes::*;
         use bytes::BufMut;
 
-        let mut packet = bytes::BytesMut::with_capacity(self.len() as usize);
+        let mut packet = bytes::BytesMut::with_capacity(self.encoded_length());
 
         let (icmp_type, code) = self.type_and_code_u8();
 
@@ -334,7 +366,10 @@ impl<T: AsRef<[u8]>> common::WriteToBuffer for ICMPMessage<T> {
                 packet.put_u16(m.sequence_number);
                 packet.put_slice(m.data.as_ref());
             }
-            DestinationUnreachable(m) => packet.put_slice(m.data.as_ref()),
+            DestinationUnreachable(m) => {
+                m.ipv4header.write_to_buffer(&mut packet);
+                packet.put_slice(&m.datagram);
+            }
             SourceQuench(data) => packet.put_slice(data.as_ref()),
             Redirect(m) => packet.put_slice(m.data.as_ref()),
             TimeExceeded(m) => packet.put_slice(m.data.as_ref()),
@@ -352,7 +387,7 @@ impl<T: AsRef<[u8]>> common::WriteToBuffer for ICMPMessage<T> {
     }
 }
 
-impl<T: AsRef<[u8]>> Debug for ICMPMessage<T> {
+impl Debug for ICMPMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         use ICMPMessageTypes::*;
 
@@ -379,7 +414,8 @@ impl<T: AsRef<[u8]>> Debug for ICMPMessage<T> {
                     .field("data", &m.data.as_ref());
             }
             DestinationUnreachable(m) => {
-                d.field("data", &m.data.as_ref());
+                d.field("ipv4_header", &m.ipv4header);
+                d.field("datagram", &m.datagram);
             }
             SourceQuench(m) => {
                 d.field("data", &m.as_ref());
@@ -395,7 +431,7 @@ impl<T: AsRef<[u8]>> Debug for ICMPMessage<T> {
             }
         }
 
-        d.field("len()", &(self.len()));
+        d.field("len()", &(self.encoded_length()));
 
         d.finish()
     }

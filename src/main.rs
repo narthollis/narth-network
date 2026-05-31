@@ -9,7 +9,7 @@ const MTU: u16 = 1500;
 
 const MAC_OURS: MacAddr = MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x01);
 const MAC_HOST: MacAddr = MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x10);
-const IPV4_OURS: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 1);
+const IPV4_OURS: Ipv4Addr = Ipv4Addr::new(192, 168, 174, 108);
 const IPV4_HOST: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 2);
 const IPV4_NETWORK_PREFIX: u8 = 24;
 
@@ -19,7 +19,7 @@ fn main() -> std::io::Result<()> {
         .layer(tun_rs::Layer::L2)
         .mac_addr(MAC_HOST.octets())
         .mtu(MTU)
-        .ipv4(IPV4_HOST, IPV4_NETWORK_PREFIX, None)
+        //.ipv4(IPV4_HOST, IPV4_NETWORK_PREFIX, None)
         //.ipv6()
         .packet_information(false)
         .build_sync()?);
@@ -40,33 +40,28 @@ fn main() -> std::io::Result<()> {
     let inst = std::time::Instant::now();
 
     println!(
-        "{:?} Trying to add IPv4 address matching host ({})...",
-        inst.elapsed(),
-        IPV4_HOST
-    );
-    if let Err(e) = interface.add_ipv4_address(IPV4_HOST, IPV4_NETWORK_PREFIX) {
-        eprintln!(
-            "\x1b[31m{:?} Failed to add ipv4 address ({}): {}\x1b[0m",
-            inst.elapsed(),
-            IPV4_HOST,
-            e
-        );
-    }
-
-    println!(
         "{:?} Trying to add IPv4 other address ({})...",
         inst.elapsed(),
         IPV4_OURS
     );
-    if let Ok(()) = interface.add_ipv4_address(IPV4_OURS, IPV4_NETWORK_PREFIX) {
+    if let Ok(()) = interface.ipv4_address_add(IPV4_OURS, IPV4_NETWORK_PREFIX) {
         println!("{:?} Added ipv4 address {}", inst.elapsed(), IPV4_OURS);
     }
 
-    if let Err(err) = interface.ping(IPV4_HOST, Some(4), None) {
-        println!("{:?} Failed to ping: {}", inst.elapsed(), err);
+    match interface.ipv4_route_add(
+        Ipv4Addr::UNSPECIFIED,
+        0,
+        Ipv4Addr::from_octets([192, 168, 174, 1]),
+        None,
+    ) {
+        Ok(_) => println!("{:?} Added IPv4 route", inst.elapsed()),
+        Err(e) => eprintln!("Failed to add ipv4 route: {}", e),
     }
 
-    if let Err(err) = interface.ping(Ipv4Addr::from_octets([192, 168, 174, 108]), Some(4), None) {
+    println!("IPv4 Addresses: {:?}", interface.ipv4_addresses());
+    println!("IPv4 Routes: {:?}", interface.ipv4_routes());
+
+    if let Err(err) = interface.ping(Ipv4Addr::from_octets([1, 1, 1, 1]), Some(4), None) {
         println!("{:?} Failed to ping: {}", inst.elapsed(), err);
     }
 

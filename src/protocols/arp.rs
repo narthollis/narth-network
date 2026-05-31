@@ -240,7 +240,10 @@ pub enum ArpState {
     PendingWait,
     /// If Pending wait time exced and max retry exced
     Timeout,
+    /// The entry exists and is current - enjoy
     Resolved(MacAddr),
+    /// The entry exists, but it's outside the TTL - so use this but also send a new request please
+    ResolvedStale(MacAddr),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -266,7 +269,9 @@ pub struct ArpTable {
 
 const ARP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 const ARP_REQUEST_MAX_RETRY: u8 = 5;
-const ARP_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
+const ARP_LIFETIME_SEC: u64 = 30;
+const ARP_LIFETIME: std::time::Duration = std::time::Duration::from_secs(ARP_LIFETIME_SEC);
+const ARP_LIFETIME_STALE_SEC: u64 = 60;
 
 impl ArpTable {
     pub fn new() -> Self {
@@ -336,20 +341,28 @@ impl ArpTable {
                     ArpState::Timeout
                 }
             }
-            ArpTableEntry::Resolved { last_seen, address } => {
-                if last_seen.elapsed() > ARP_LIFETIME {
+            ArpTableEntry::Resolved { last_seen, address } => match last_seen.elapsed().as_secs() {
+                ARP_LIFETIME_STALE_SEC.. => {
                     self.table.remove(&ipv4addr);
                     ArpState::PendingRetry
-                } else {
-                    ArpState::Resolved(*address)
                 }
-            }
+                ARP_LIFETIME_SEC..ARP_LIFETIME_STALE_SEC => ArpState::ResolvedStale(*address),
+                ..ARP_LIFETIME_SEC => ArpState::Resolved(*address),
+            },
         }
+    }
+
+    pub fn pending(&self) -> Vec<Ipv4Addr> {
+        self.table
+            .iter()
+            .filter(|(_, entry)| matches!(entry, ArpTableEntry::Pending { .. }))
+            .map(|(ip, _)| *ip)
+            .collect()
     }
 
     pub fn can_send_request(&mut self, ipv4addr: Ipv4Addr) -> bool {
         let now = Instant::now();
-        match self
+        let entry = self
             .table
             .entry(ipv4addr)
             .and_modify(|mut entry| {
@@ -361,10 +374,8 @@ impl ArpTable {
             .or_insert(ArpTableEntry::Pending {
                 since: now,
                 retry_count: 0,
-            }) {
-            ArpTableEntry::Pending { .. } => true,
-            _ => false,
-        }
+            });
+        matches!(entry, ArpTableEntry::Pending { .. })
     }
 
     // pub fn handle(&mut self, recv_arp: ArpMessage, our_mac: MacAddr) -> Result<ArpMessage, Error> {

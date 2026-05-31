@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::ops::BitAnd;
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug)]
@@ -17,7 +18,7 @@ impl<T: Eq + Hash + Clone + Copy> Default for AddressTable<T> {
     }
 }
 
-impl<T: Eq + Hash + Clone + Copy> AddressTable<T> {
+impl<T: Eq + Hash + Clone + Copy + BitAnd<Output = T>> AddressTable<T> {
     pub fn shared(&self) -> Arc<RwLock<Vec<(T, T)>>> {
         self.shared.clone()
     }
@@ -40,5 +41,13 @@ impl<T: Eq + Hash + Clone + Copy> AddressTable<T> {
 
     pub fn contains(&self, value: &T) -> bool {
         self.local.contains_key(value)
+    }
+
+    /// Find the first assigned address whose subnet contains value
+    pub fn first_with_subnet_containing(&self, value: &T) -> Option<T> {
+        self.local
+            .iter()
+            .find(|(addr, mask)| *value & **mask == **addr & **mask)
+            .map(|(addr, _)| *addr)
     }
 }

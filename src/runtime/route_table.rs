@@ -40,6 +40,10 @@ pub struct RouteTable<T: Ord + BitAnd<Output = T>> {
 }
 
 impl<T: Ord + BitAnd<Output = T> + Clone + Copy> RouteTable<T> {
+    pub fn shared(&self) -> Arc<RwLock<Vec<RouteInformation<T>>>> {
+        self.shared.clone()
+    }
+
     fn update_shared(&mut self) {
         let next = self.routes.clone();
         let mut shared = self.shared.write().expect("route table poisoned rwlock");
