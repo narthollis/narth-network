@@ -274,12 +274,6 @@ const ARP_LIFETIME: std::time::Duration = std::time::Duration::from_secs(ARP_LIF
 const ARP_LIFETIME_STALE_SEC: u64 = 60;
 
 impl ArpTable {
-    pub fn new() -> Self {
-        ArpTable {
-            table: HashMap::new(),
-        }
-    }
-
     pub fn update_or_insert(&mut self, mac: MacAddr, ipv4: Ipv4Addr) {
         self.table.insert(
             ipv4,

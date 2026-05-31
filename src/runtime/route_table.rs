@@ -78,20 +78,20 @@ impl<T: Ord + BitAnd<Output = T> + Clone + Copy> RouteTable<T> {
     }
 }
 
-impl RouteTable<Ipv4Addr> {
-    pub fn new() -> Self {
+impl Default for RouteTable<Ipv4Addr> {
+    fn default() -> Self {
         RouteTable {
-            routes: Vec::new(),
-            shared: Arc::new(RwLock::new(vec![])),
+            routes: Vec::default(),
+            shared: Arc::default(),
         }
     }
 }
 
-impl RouteTable<Ipv6Addr> {
-    pub fn new() -> Self {
+impl Default for RouteTable<Ipv6Addr> {
+    fn default() -> Self {
         RouteTable {
-            routes: Vec::new(),
-            shared: Arc::new(RwLock::new(vec![])),
+            routes: Vec::default(),
+            shared: Arc::default(),
         }
     }
 }

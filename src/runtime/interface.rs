@@ -2,6 +2,7 @@ use crate::common::WriteToBuffer;
 use crate::protocols::arp::{ArpMessage, ArpState, ArpTable, Operation};
 use crate::protocols::ethernet::mac::MacAddr;
 use crate::protocols::ethernet::{EtherType, EthernetHeader};
+use crate::protocols::ipv4::icmp::DestinationUnreachableCode::{HostUnreachable, NetUnreachable};
 use crate::protocols::ipv4::icmp::{
     DestinationUnreachableCode, DestinationUnreachableMessage,
     ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH, ICMPMessage, ICMPMessageTypes,
@@ -9,6 +10,7 @@ use crate::protocols::ipv4::icmp::{
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header, prefix_to_mask};
 use crate::runtime::address_table::AddressTable;
 use crate::runtime::common::{NetworkHandle, NetworkRecvPayload, NetworkSendPayload};
+use crate::runtime::ping::PingManager;
 use crate::runtime::route_table::{RouteInformation, RouteTable};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -60,7 +62,8 @@ pub(crate) enum InterfaceControlMessage {
         target: Ipv4Addr,
         count: Option<u16>,
         interval: std::time::Duration,
-    }, // ResultSender<PingResponse>),
+        reply: ResultSender<super::ping::PingSession>,
+    },
     Stop(),
 }
 
@@ -101,14 +104,19 @@ impl Interface {
         target: Ipv4Addr,
         count: Option<u16>,
         interval: Option<std::time::Duration>,
-    ) -> Result<()> {
+    ) -> Result<super::ping::PingSession> {
+        let (tx, rx) = oneshot::channel();
+
         self.control
             .send(InterfaceControlMessage::Ping {
                 target,
                 count,
                 interval: interval.unwrap_or_else(|| std::time::Duration::from_secs(1)),
+                reply: tx,
             })
-            .map_err(|_| Error::ControlFailed)
+            .map_err(|_| Error::ControlFailed)?;
+
+        rx.recv().map_err(|_| Error::ControlFailed)?
     }
 
     pub fn ipv4_address_add(&self, addr: Ipv4Addr, prefix: u8) -> Result<()> {
@@ -182,12 +190,13 @@ pub(crate) struct InterfaceWorker {
     network: NetworkHandle,
     mtu: usize,
     mac_addr: MacAddr,
-    // ipv6addr: Ipv6Addr,
-    arp_table: ArpTable,
 
+    ping_manager: super::ping::PingManager,
+
+    arp_table: ArpTable,
     ipv4_addresses: AddressTable<Ipv4Addr>,
-    ipv4_pending_addresses: Vec<(Ipv4Addr, Ipv4Addr, ResultSender<()>)>,
     ipv4_route_table: RouteTable<Ipv4Addr>,
+    ipv4_pending_addresses: Vec<(Ipv4Addr, Ipv4Addr, ResultSender<()>)>,
     ipv4_send_buffer: HashMap<Ipv4Addr, VecDeque<(IPv4Header, bytes::Bytes)>>,
 }
 
@@ -203,12 +212,14 @@ impl InterfaceWorker {
             network,
             mtu,
             mac_addr,
-            arp_table: ArpTable::new(),
 
-            ipv4_addresses: Default::default(),
-            ipv4_pending_addresses: Default::default(),
-            ipv4_route_table: RouteTable::<Ipv4Addr>::new(),
-            ipv4_send_buffer: Default::default(),
+            ping_manager: PingManager::default(),
+
+            arp_table: ArpTable::default(),
+            ipv4_addresses: AddressTable::default(),
+            ipv4_route_table: RouteTable::default(),
+            ipv4_pending_addresses: Vec::default(),
+            ipv4_send_buffer: HashMap::default(),
         }
     }
 
@@ -263,21 +274,25 @@ impl InterfaceWorker {
                 InterfaceControlMessage::IPv4RouteRemove() => todo!(),
                 InterfaceControlMessage::Ping {
                     target,
-                    count: _count,
-                    interval: _interval,
+                    count,
+                    interval,
+                    reply,
                 } => {
-                    let echo_request = ICMPMessage::new_echo_request(None, 1);
-                    if let Err(err) = self.send_ipv4(
-                        target,
-                        Ipv4Addr::UNSPECIFIED,
-                        IPProtocolTypes::ICMP,
-                        echo_request,
-                    ) {
-                        eprintln!(
-                            "Interface {}: Failed to ping {}: {}",
-                            self.mac_addr, target, err
-                        );
-                    };
+                    let session = self.ping_manager.ping(target, count.unwrap_or(4), interval);
+                    _ = reply.send(Ok(session));
+
+                    // let echo_request = ICMPMessage::new_echo_request(None, 1);
+                    // if let Err(err) = self.send_ipv4(
+                    //     target,
+                    //     Ipv4Addr::UNSPECIFIED,
+                    //     IPProtocolTypes::ICMP,
+                    //     echo_request,
+                    // ) {
+                    //     eprintln!(
+                    //         "Interface {}: Failed to ping {}: {}",
+                    //         self.mac_addr, target, err
+                    //     );
+                    // };
                 }
                 InterfaceControlMessage::Stop() => {
                     return false;
@@ -361,6 +376,14 @@ impl InterfaceWorker {
 
     fn perform_timers(&mut self) {
         self.perform_arp_timers();
+        for (target, message) in self.ping_manager.perform_timers() {
+            self.send_ipv4(
+                target,
+                Ipv4Addr::UNSPECIFIED,
+                IPProtocolTypes::ICMP,
+                message,
+            );
+        }
     }
 
     fn perform_arp_timers(&mut self) {
@@ -460,30 +483,41 @@ impl InterfaceWorker {
         source: Ipv4Addr,
         protocol: IPProtocolTypes,
         payload: impl WriteToBuffer,
-    ) -> io::Result<()> {
-        let route = self
-            .ipv4_route_table
-            .lookup(destination)
-            .ok_or(io::Error::new(
-                io::ErrorKind::NetworkUnreachable,
-                "No route to host",
-            ))?;
-
+    ) {
         // This is where we should do fragmentation if were supported it
         // instead I'm going panic (ethernet = (18 vlan assumption) ip = 20)
         assert!(payload.encoded_length() <= self.mtu - 18 - 20);
+        // We shold probably drop + log in the following circumstace (or this is an actual case for sync result maybe
+        // ICMP requires the first 64 bits/8 bytes of the paylaod be included in control mesages - so an IP frame
+        // less than that is currenlty out of scope
+        assert!(payload.encoded_length() > 8);
+
+        let payload = {
+            let mut buff = bytes::BytesMut::with_capacity(payload.encoded_length());
+            payload.write_to_buffer(&mut buff);
+            buff.freeze()
+        };
+
+        let raw_header = IPv4Header::new(protocol, source, destination, payload.len() as u16);
+
+        let route = match self.ipv4_route_table.lookup(destination) {
+            Some(route) => route,
+            None => {
+                _ = self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
+                    code: NetUnreachable,
+                    ipv4header: raw_header,
+                    datagram: payload.slice(..ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH),
+                });
+                return;
+            }
+        };
 
         let header = IPv4Header::new(
             protocol,
             source.or_unspecified(route.source),
             destination,
-            payload.encoded_length() as u16,
+            payload.len() as u16,
         );
-
-        let mut payload_bytes = bytes::BytesMut::with_capacity(payload.encoded_length());
-        payload.write_to_buffer(&mut payload_bytes);
-
-        let payload_bytes = payload_bytes.freeze();
 
         let next_hop = route.next_hop.unwrap_or(destination);
 
@@ -501,20 +535,20 @@ impl InterfaceWorker {
                 self.ipv4_send_buffer
                     .entry(next_hop)
                     .or_default()
-                    .push_back((header, payload_bytes));
+                    .push_back((header, payload));
             }
             ArpState::Resolved(dest_mac) | ArpState::ResolvedStale(dest_mac) => {
-                self.send_ethernet(dest_mac, EtherType::IPv4, (header, payload_bytes))?;
+                _ = self.send_ethernet(dest_mac, EtherType::IPv4, (header, payload));
             }
             ArpState::Timeout => {
-                return Err(io::Error::new(
-                    io::ErrorKind::HostUnreachable,
-                    "arp timeout",
-                ));
+                _ = self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
+                    code: HostUnreachable,
+                    ipv4header: raw_header,
+                    datagram: payload.slice(..ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH),
+                });
+                return;
             }
         };
-
-        Ok(())
     }
 
     fn recv(&mut self, ethernet: &EthernetHeader, bytes: &bytes::Bytes) -> io::Result<()> {
@@ -586,21 +620,20 @@ impl InterfaceWorker {
         payload: &bytes::Bytes,
     ) -> io::Result<()> {
         let icmp = ICMPMessage::from_bytes(payload)?;
+        print_incoming(3, &icmp);
 
         match &icmp.message {
             ICMPMessageTypes::Echo(echo) => {
-                print_incoming(3, &icmp);
-
                 let echo_reply = ICMPMessage::echo_reply(echo);
                 self.send_ipv4(
                     ipv4_header.source_address(),
                     ipv4_header.destination_address(),
                     IPProtocolTypes::ICMP,
                     echo_reply,
-                )?;
+                );
             }
             ICMPMessageTypes::EchoReply(reply) => {
-                // TODO this should be forwarded to the ping manager
+                self.ping_manager.on_echo_reply(reply);
             }
             ICMPMessageTypes::DestinationUnreachable(m) => self.recv_ipv4_icmp_unreachable(m)?,
             _ => {
@@ -617,13 +650,20 @@ impl InterfaceWorker {
         &mut self,
         unreachable: &DestinationUnreachableMessage,
     ) -> io::Result<()> {
-        println!(
-            "Interface {} - ICMP Unreachable={:?} for {} datagram: {:?}",
-            self.mac_addr,
-            unreachable.code,
-            unreachable.ipv4header.destination_address(),
-            unreachable.datagram
-        );
+        match unreachable.ipv4header.protocol() {
+            IPProtocolTypes::ICMP => {
+                self.ping_manager.on_unreachable(unreachable);
+            }
+            _ => {
+                println!(
+                    "Interface {} - ICMP Unreachable={:?} for {} datagram: {:?}",
+                    self.mac_addr,
+                    unreachable.code,
+                    unreachable.ipv4header.destination_address(),
+                    unreachable.datagram
+                );
+            }
+        }
 
         Ok(())
     }
