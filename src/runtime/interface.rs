@@ -10,7 +10,6 @@ use crate::protocols::ipv4::icmp::{
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header, prefix_to_mask};
 use crate::runtime::address_table::AddressTable;
 use crate::runtime::common::{NetworkHandle, NetworkRecvPayload, NetworkSendPayload};
-use crate::runtime::ping::PingManager;
 use crate::runtime::route_table::{RouteInformation, RouteTable};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -60,7 +59,7 @@ pub(crate) enum InterfaceControlMessage {
     IPv4RouteRemove(),
     Ping {
         target: Ipv4Addr,
-        count: Option<u16>,
+        count: Option<usize>,
         interval: std::time::Duration,
         reply: ResultSender<super::ping::PingSession>,
     },
@@ -102,7 +101,7 @@ impl Interface {
     pub fn ping(
         &self,
         target: Ipv4Addr,
-        count: Option<u16>,
+        count: Option<usize>,
         interval: Option<std::time::Duration>,
     ) -> Result<super::ping::PingSession> {
         let (tx, rx) = oneshot::channel();
@@ -213,7 +212,7 @@ impl InterfaceWorker {
             mtu,
             mac_addr,
 
-            ping_manager: PingManager::default(),
+            ping_manager: super::ping::PingManager::default(),
 
             arp_table: ArpTable::default(),
             ipv4_addresses: AddressTable::default(),
@@ -278,7 +277,7 @@ impl InterfaceWorker {
                     interval,
                     reply,
                 } => {
-                    let session = self.ping_manager.ping(target, count.unwrap_or(4), interval);
+                    let session = self.ping_manager.ping(target, count, interval);
                     _ = reply.send(Ok(session));
 
                     // let echo_request = ICMPMessage::new_echo_request(None, 1);
@@ -426,31 +425,33 @@ impl InterfaceWorker {
 
         let buffer = buffer.freeze();
 
-        // this next part should be behind some kind of debug
-        let rem = &buffer.clone();
-        let e = EthernetHeader::from_bytes(rem)?;
-        let rem = &rem.slice(e.len()..);
+        if do_log() {
+            // this next part should be behind some kind of debug
+            let rem = &buffer.clone();
+            let e = EthernetHeader::from_bytes(rem)?;
+            let rem = &rem.slice(e.len()..);
 
-        print_outgoing(1, &e);
-        match e.ether_type() {
-            EtherType::ARP => {
-                let a = ArpMessage::from_bytes(rem)?;
-                print_outgoing(2, &a);
-            }
-            EtherType::IPv4 => {
-                let ip = IPv4Header::from_bytes(rem)?;
-                let rem = &rem.slice(ip.len()..);
-                print_outgoing(2, &ip);
-                match ip.protocol() {
-                    IPProtocolTypes::ICMP => {
-                        let icmp = ICMPMessage::from_bytes(rem)?;
-                        print_outgoing(2, &icmp);
-                    }
-                    IPProtocolTypes::UDP => {}
-                    _ => {}
+            print_outgoing(1, &e);
+            match e.ether_type() {
+                EtherType::ARP => {
+                    let a = ArpMessage::from_bytes(rem)?;
+                    print_outgoing(2, &a);
                 }
+                EtherType::IPv4 => {
+                    let ip = IPv4Header::from_bytes(rem)?;
+                    let rem = &rem.slice(ip.len()..);
+                    print_outgoing(2, &ip);
+                    match ip.protocol() {
+                        IPProtocolTypes::ICMP => {
+                            let icmp = ICMPMessage::from_bytes(rem)?;
+                            print_outgoing(2, &icmp);
+                        }
+                        IPProtocolTypes::UDP => {}
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
 
         let (send, recv) = oneshot::channel();
@@ -633,7 +634,7 @@ impl InterfaceWorker {
                 );
             }
             ICMPMessageTypes::EchoReply(reply) => {
-                self.ping_manager.on_echo_reply(reply);
+                self.ping_manager.on_echo_reply(ipv4_header, reply);
             }
             ICMPMessageTypes::DestinationUnreachable(m) => self.recv_ipv4_icmp_unreachable(m)?,
             _ => {

@@ -8,6 +8,8 @@ pub mod network;
 mod ping;
 mod route_table;
 
+pub use ping::PingResultStatus;
+
 pub trait NetworkBridge {
     type Error: core::fmt::Debug;
 

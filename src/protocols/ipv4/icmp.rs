@@ -3,6 +3,7 @@ use crate::common::WriteToBuffer;
 use crate::protocols::ipv4::IPv4Header;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
+use std::time::Duration;
 
 pub const ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH: usize = 64 / (u8::BITS as usize);
 
@@ -181,7 +182,126 @@ pub struct RedirectMessage {
 pub struct EchoMessage {
     identifier: u16,
     sequence_number: u16,
-    data: bytes::Bytes,
+    data: EchoMessageData,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum EchoMessageData {
+    Bytes(bytes::Bytes),
+    UnixLike(EchoMessageDataUnix),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct EchoMessageDataUnix {
+    pub(crate) since_epoc: std::time::Duration,
+    pub(crate) monotonic_instant: Option<Duration>,
+}
+
+pub(crate) static BOOT_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+impl EchoMessageDataUnix {
+    const LENGTH: usize = 56;
+    const EMPTY: [u8; Self::LENGTH] = const {
+        let mut e = [0u8; Self::LENGTH];
+        let mut i = 0;
+        while i < e.len() {
+            e[i] = i as u8;
+            i += 1;
+        }
+        e
+    };
+
+    pub fn new() -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+
+        EchoMessageDataUnix {
+            since_epoc: now,
+            monotonic_instant: Some(
+                std::time::Instant::now()
+                    .duration_since(*BOOT_TIME.get_or_init(|| std::time::Instant::now())),
+            ),
+        }
+    }
+}
+
+impl WriteToBuffer for EchoMessageDataUnix {
+    fn encoded_length(&self) -> usize {
+        Self::LENGTH
+    }
+
+    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+        buffer.put_u64_ne(self.since_epoc.as_secs());
+        buffer.put_u64_ne(self.since_epoc.subsec_micros() as u64);
+
+        let mut pad_len = 56 - 16;
+
+        if let Some(monotonic_instant) = self.monotonic_instant {
+            buffer.put_u128_ne(monotonic_instant.as_nanos());
+
+            // And we now need to pad 16 fewer bytes
+            pad_len -= 16;
+        }
+
+        buffer.put_slice(Self::EMPTY[pad_len..].as_ref());
+    }
+}
+
+impl TryFrom<&bytes::Bytes> for EchoMessageDataUnix {
+    type Error = std::io::Error;
+
+    /// Try and get Unix-like ping data (with the addition of our monotomic timer)
+    /// But this has a very high chance of just returning junk
+    /// As far as I have been able to tell there aren't any real markers
+    /// So we should probably only call this on EchoReply's that we have already matched
+    fn try_from(value: &bytes::Bytes) -> Result<Self, Self::Error> {
+        if value.len() < Self::LENGTH {
+            return std::io::Result::Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "ICMP Payload truncated parsing",
+            ));
+        }
+
+        // using unwrap because we verified length above
+        let sec = u64::from_ne_bytes(value[..8].try_into().unwrap());
+        let micros = u64::from_ne_bytes(value[8..16].try_into().unwrap());
+
+        let nanos: u128 = sec as u128 * 1_000_000_000 + (micros * 1_000) as u128;
+
+        let since_epoc = Duration::from_nanos_u128(nanos);
+
+        let maybe_monotonic_instant: [u8; 16] = value[16..32].try_into().unwrap();
+        let mut monotonic_instant = None;
+        if maybe_monotonic_instant != Self::EMPTY[16..32] {
+            let nanos = u128::from_ne_bytes(maybe_monotonic_instant);
+            // It would be great to do some extra validation here we didn't jst decode junk
+            // but... I got nothin
+            if nanos > 0 && nanos < Duration::MAX.as_nanos() {
+                monotonic_instant = Some(Duration::from_nanos_u128(nanos));
+            }
+        }
+
+        Ok(EchoMessageDataUnix {
+            since_epoc,
+            monotonic_instant,
+        })
+    }
+}
+
+impl EchoMessage {
+    pub fn identifier(&self) -> u16 {
+        self.identifier
+    }
+    pub fn sequence_number(&self) -> u16 {
+        self.sequence_number
+    }
+    pub fn parse_unix_data(&self) -> Result<EchoMessageDataUnix, std::io::Error> {
+        match &self.data {
+            EchoMessageData::UnixLike(data) => Ok(*data),
+            EchoMessageData::Bytes(bytes) => bytes.try_into(),
+        }
+    }
 }
 
 impl TryFrom<&bytes::Bytes> for EchoMessage {
@@ -191,7 +311,7 @@ impl TryFrom<&bytes::Bytes> for EchoMessage {
         Ok(EchoMessage {
             identifier: u16::from_be_bytes([bytes[4], bytes[5]]),
             sequence_number: u16::from_be_bytes([bytes[6], bytes[7]]),
-            data: bytes.slice(8..),
+            data: EchoMessageData::Bytes(bytes.slice(8..)),
         })
     }
 }
@@ -215,32 +335,13 @@ pub struct ICMPMessage {
 }
 
 impl ICMPMessage {
-    pub fn new_echo_request(identifier: Option<u16>, sequence: u16) -> ICMPMessage {
-        use bytes::BufMut;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-
-        let sec = now.as_secs().to_ne_bytes();
-        let usec = (now.subsec_micros() as u64).to_ne_bytes();
-
-        let mut data = bytes::BytesMut::with_capacity(56);
-        data.put_u64_ne(now.as_secs());
-        data.put_u64_ne(now.subsec_micros() as u64);
-
-        let padding_start = sec.len() + usec.len();
-        for (i, v) in data[padding_start..].iter_mut().enumerate() {
-            *v = i as u8;
-        }
-        let data = data.freeze();
-
+    pub fn new_echo_request(identifier: u16, sequence: u16) -> ICMPMessage {
         ICMPMessage {
             checksum: [0, 0],
             message: ICMPMessageTypes::Echo(EchoMessage {
-                identifier: identifier.unwrap_or_else(|| fastrand::u16(..)),
+                identifier,
                 sequence_number: sequence,
-                data,
+                data: EchoMessageData::UnixLike(EchoMessageDataUnix::new()),
             }),
         }
     }
@@ -318,7 +419,10 @@ impl common::WriteToBuffer for ICMPMessage {
             EchoReply(m) | Echo(m) => {
                 2 // Identifier
                     + 2 // Sequence
-                    + m.data.as_ref().len()
+                    + match &m.data {
+                    EchoMessageData::Bytes(b) => b.len(),
+                    EchoMessageData::UnixLike(d) => d.encoded_length(),
+                }
             }
             DestinationUnreachable(m) => {
                 4 // Reserved
@@ -364,7 +468,10 @@ impl common::WriteToBuffer for ICMPMessage {
             Echo(m) | EchoReply(m) => {
                 packet.put_u16(m.identifier);
                 packet.put_u16(m.sequence_number);
-                packet.put_slice(m.data.as_ref());
+                match &m.data {
+                    EchoMessageData::Bytes(b) => packet.put_slice(b),
+                    EchoMessageData::UnixLike(d) => d.write_to_buffer(&mut packet),
+                }
             }
             DestinationUnreachable(m) => {
                 m.ipv4header.write_to_buffer(&mut packet);
@@ -411,7 +518,13 @@ impl Debug for ICMPMessage {
             Echo(m) | EchoReply(m) => {
                 d.field("identifier", &m.identifier)
                     .field("sequence_number", &m.sequence_number)
-                    .field("data", &m.data.as_ref());
+                    .field(
+                        "data",
+                        match &m.data {
+                            EchoMessageData::Bytes(b) => b,
+                            EchoMessageData::UnixLike(d) => d,
+                        },
+                    );
             }
             DestinationUnreachable(m) => {
                 d.field("ipv4_header", &m.ipv4header);

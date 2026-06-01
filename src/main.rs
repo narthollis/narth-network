@@ -61,8 +61,42 @@ fn main() -> std::io::Result<()> {
     println!("IPv4 Addresses: {:?}", interface.ipv4_addresses());
     println!("IPv4 Routes: {:?}", interface.ipv4_routes());
 
-    if let Err(err) = interface.ping(Ipv4Addr::from_octets([1, 1, 1, 1]), Some(4), None) {
-        println!("{:?} Failed to ping: {}", inst.elapsed(), err);
+    match interface.ping(Ipv4Addr::from_octets([1, 1, 1, 1]), None, None) {
+        Ok(ping) => {
+            for result in ping {
+                match result.status {
+                    narth_net::runtime::PingResultStatus::Success(Some(duration)) => {
+                        println!(
+                            "Ping {} - {} - Success - Took {}.{:09}",
+                            result.target,
+                            result.sequence + 1,
+                            duration.as_secs(),
+                            duration.subsec_nanos()
+                        );
+                    }
+                    narth_net::runtime::PingResultStatus::Success(None) => {
+                        println!("Ping {} - {} - Success", result.target, result.sequence + 1,);
+                    }
+                    narth_net::runtime::PingResultStatus::Timeout => {
+                        println!(
+                            "Ping {} - {} - Error Timeout",
+                            result.target,
+                            result.sequence + 1,
+                        );
+                    }
+                    narth_net::runtime::PingResultStatus::Unreachable(err) => {
+                        println!(
+                            "Ping {} - {} - Error {}",
+                            result.target,
+                            result.sequence + 1,
+                            err
+                        );
+                    }
+                }
+            }
+            println!("Ping finished");
+        }
+        Err(e) => eprintln!("Failed to ping: {}", e),
     }
 
     jh.join().expect("Failed to join network thread");
