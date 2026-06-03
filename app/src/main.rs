@@ -1,19 +1,54 @@
 use narth_net::protocols::ethernet::mac::MacAddr;
+use narth_net::runtime::interface::Interface;
 use narth_net::runtime::network::Network;
+use std::io::{Write, stdout};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::fd::{AsRawFd, RawFd};
+use std::pin::pin;
 use std::thread;
 use std::time::Duration;
 use tun_rs::SyncDevice;
 
+mod seq;
+
 const MTU: u16 = 1500;
 
-const MAC_OURS: MacAddr = MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x01);
+const MAC_OURS: MacAddr = MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x31);
 const MAC_HOST: MacAddr = MacAddr::new(0x02, 0x00, 0x00, 0x00, 0x00, 0x10);
 const IPV4_OURS: Ipv4Addr = Ipv4Addr::new(192, 168, 174, 108);
 const IPV4_HOST: Ipv4Addr = Ipv4Addr::new(192, 168, 20, 2);
 const IPV4_NETWORK_PREFIX: u8 = 24;
 
-fn main() -> std::io::Result<()> {
+//#[tokio::main]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let seq_endpoint = "http://127.0.0.1:5341/ingest/otlp";
+    let tracer_provider = seq::init_telemetry(seq_endpoint)?;
+
+    tracing::info!(
+        "Application booted and telemetry routing to Seq at {}.",
+        seq_endpoint
+    );
+
+    {
+        let session_span = tracing::info_span!("connection_handler", remote_ip = "127.0.0.1");
+        let _guard = session_span.enter();
+        tracing::info!("about to run stuff");
+
+        s_main()?;
+    }
+
+    tracing::info!("Application logic completed safely.");
+
+    tracer_provider.shutdown();
+
+    Ok(())
+}
+
+fn s_main() -> std::io::Result<()> {
+    // tracing_subscriber::registry()
+    //     .with(fmt::layer().pretty())
+    //     .with(tracing_subscriber::EnvFilter::from_default_env())
+    //     .init();
     let tap = Tap(tun_rs::DeviceBuilder::new()
         .name("narth%d")
         .layer(tun_rs::Layer::L2)
@@ -37,15 +72,14 @@ fn main() -> std::io::Result<()> {
         std::thread::sleep(Duration::from_secs(10));
     }
 
-    let inst = std::time::Instant::now();
-
-    println!(
-        "{:?} Trying to add IPv4 other address ({})...",
-        inst.elapsed(),
-        IPV4_OURS
-    );
-    if let Ok(()) = interface.ipv4_address_add(IPV4_OURS, IPV4_NETWORK_PREFIX) {
-        println!("{:?} Added ipv4 address {}", inst.elapsed(), IPV4_OURS);
+    print!("Trying to add IPv4 address ({})...", IPV4_OURS);
+    _ = stdout().flush();
+    match interface.ipv4_address_add(IPV4_OURS, IPV4_NETWORK_PREFIX) {
+        Ok(_) => println!(" Added"),
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            return Err(std::io::Error::other(e));
+        }
     }
 
     match interface.ipv4_route_add(
@@ -54,24 +88,72 @@ fn main() -> std::io::Result<()> {
         Ipv4Addr::from_octets([192, 168, 174, 1]),
         None,
     ) {
-        Ok(_) => println!("{:?} Added IPv4 route", inst.elapsed()),
-        Err(e) => eprintln!("Failed to add ipv4 route: {}", e),
+        Ok(_) => println!("Added default ipv4 route"),
+        Err(e) => eprintln!("Failed to add default ipv4 route: {}", e),
     }
 
-    println!("IPv4 Addresses: {:?}", interface.ipv4_addresses());
-    println!("IPv4 Routes: {:?}", interface.ipv4_routes());
+    println!();
+    println!(
+        "IPv4 Addresses: {:?}",
+        interface
+            .ipv4_addresses()
+            .unwrap()
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!("IPv4 Routes:");
+    for route in interface.ipv4_routes().unwrap() {
+        match route.next_hop {
+            Some(next_hop) => println!(
+                "  {}/{} via {} from {}",
+                route.target,
+                route.mask.to_bits().leading_ones() as u8,
+                next_hop,
+                route.source
+            ),
+            None => println!(
+                "  {}/{} from {}",
+                route.target,
+                route.mask.to_bits().leading_ones() as u8,
+                route.source
+            ),
+        }
+    }
 
-    match interface.ping(Ipv4Addr::from_octets([1, 1, 1, 1]), None, None) {
+    println!();
+    println!("Pining device on network");
+    ping(&interface, [192, 168, 174, 57].into(), 4);
+
+    println!();
+    println!("Pining host (other network card)");
+    ping(&interface, [192, 168, 174, 175].into(), 4);
+
+    println!();
+    println!("Pining router");
+    ping(&interface, [192, 168, 174, 1].into(), 4);
+
+    println!();
+    println!("Ping the internet!");
+    ping(&interface, [1, 1, 1, 1].into(), 4);
+
+    jh.join().expect("Failed to join network thread");
+
+    Ok(())
+}
+
+fn ping(interface: &Interface, addr: Ipv4Addr, count: usize) {
+    match interface.ping(addr, count.into(), None) {
         Ok(ping) => {
             for result in ping {
                 match result.status {
                     narth_net::runtime::PingResultStatus::Success(Some(duration)) => {
                         println!(
-                            "Ping {} - {} - Success - Took {}.{:09}",
+                            "Ping {} - {} - Success - Took {:.4} ms",
                             result.target,
                             result.sequence + 1,
-                            duration.as_secs(),
-                            duration.subsec_nanos()
+                            duration.as_secs_f64() * 1_000.0,
                         );
                     }
                     narth_net::runtime::PingResultStatus::Success(None) => {
@@ -98,10 +180,6 @@ fn main() -> std::io::Result<()> {
         }
         Err(e) => eprintln!("Failed to ping: {}", e),
     }
-
-    jh.join().expect("Failed to join network thread");
-
-    Ok(())
 }
 
 struct Tap(SyncDevice);
@@ -146,5 +224,11 @@ impl narth_net::runtime::NetworkBridge for Tap {
 
     fn recv(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         self.0.recv(buffer)
+    }
+}
+
+impl AsRawFd for Tap {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
     }
 }

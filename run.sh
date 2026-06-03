@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:5341"
+
 # CONFIG
 
 BRIDGE="narth-br0"
@@ -8,7 +10,7 @@ TAP_INTERFACE="narth0"
 
 # DO things
 
-sudo setcap cap_net_admin+ep target/debug/narth-net
+sudo setcap cap_net_admin+ep target/debug/narth-net-app
 
 cleanup() {
     echo "$PID"
@@ -30,7 +32,7 @@ if ! ip link show "$PHYS_INTERFACE" | grep -q master; then
   sudo ip link set dev "$PHYS_INTERFACE" up
 fi
 
-RUST_BACKTRACE="${RUST_BACKTRACE:-1}" exec target/debug/narth-net "$@" &
+RUST_BACKTRACE="${RUST_BACKTRACE:-1}" exec target/debug/narth-net-app "$@" &
   # | grep -vE '^>|^<'
   #  2> >(sed -u $'s/.*/\e[31m&\e[0m/' >&2) \
 PID=$!

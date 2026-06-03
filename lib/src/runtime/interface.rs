@@ -9,12 +9,15 @@ use crate::protocols::ipv4::icmp::{
 };
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header, prefix_to_mask};
 use crate::runtime::address_table::AddressTable;
-use crate::runtime::common::{NetworkHandle, NetworkRecvPayload, NetworkSendPayload};
+use crate::runtime::common::*;
 use crate::runtime::route_table::{RouteInformation, RouteTable};
+use mio::event::Event;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, RwLock, mpsc, oneshot};
+use tracing::{debug, error, trace, trace_span};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -73,16 +76,14 @@ pub struct Interface {
 }
 
 impl Interface {
-    pub(crate) fn new(
+    pub(super) fn new(
         mtu: usize,
         mac_address: MacAddr,
-        send: mpsc::Sender<NetworkSendPayload>,
-        recv: mpsc::Receiver<NetworkRecvPayload>,
+        send: super::common::NetworkSender<NetworkSendPayload>,
     ) -> (Self, InterfaceWorker) {
         let (control_tx, control_rx) = mpsc::sync_channel(10);
 
-        let worker =
-            InterfaceWorker::new(control_rx, NetworkHandle { send, recv }, mtu, mac_address);
+        let worker = InterfaceWorker::new(control_rx, send, mtu, mac_address);
         let interface = Interface {
             control: control_tx,
             ipv4_addresses: worker.ipv4_addresses.shared(),
@@ -186,7 +187,7 @@ impl Interface {
 
 pub(crate) struct InterfaceWorker {
     control_rx: mpsc::Receiver<InterfaceControlMessage>,
-    network: NetworkHandle,
+    network_send: NetworkSender<NetworkSendPayload>,
     mtu: usize,
     mac_addr: MacAddr,
 
@@ -200,15 +201,15 @@ pub(crate) struct InterfaceWorker {
 }
 
 impl InterfaceWorker {
-    pub(crate) fn new(
+    pub(super) fn new(
         control_rx: mpsc::Receiver<InterfaceControlMessage>,
-        network: NetworkHandle,
+        network_send: NetworkSender<NetworkSendPayload>,
         mtu: usize,
         mac_addr: MacAddr,
     ) -> Self {
         InterfaceWorker {
             control_rx,
-            network,
+            network_send,
             mtu,
             mac_addr,
 
@@ -222,34 +223,54 @@ impl InterfaceWorker {
         }
     }
 
+    const WAKE_TOKEN: mio::Token = mio::Token(0);
+
     pub fn run(&mut self) {
+        let mut poll = mio::Poll::new().expect("failed to create mio::Poll");
+
+        let waker = std::sync::Arc::new(
+            mio::Waker::new(poll.registry(), Self::WAKE_TOKEN)
+                .expect("failed to create mio::Waker"),
+        );
+        let (network_tx, network_rx) = std::sync::mpsc::channel();
+
+        let sender = NetworkSender::new(waker, network_tx);
+        self.network_send
+            .send(NetworkSendPayload::Listen(self.mac_addr, sender))
+            .expect("failed to send listen commadn to network");
+
+        let mut events = mio::Events::with_capacity(1024);
+
         let mut running = true;
         while running {
-            // Process all control messages before moving on
-            running = self.perform_control();
+            // TODO this delay really needs to be computed from the pending timers - right now its almost pointless to be using poll
+            poll.poll(&mut events, None) //Some(std::time::Duration::from_micros(10)))
+                .expect("interface poll failed");
 
-            match self.network.recv.try_recv() {
-                Ok(message) => match message {
-                    NetworkRecvPayload::Packet(eth, bytes) => {
-                        if let Err(err) = self.recv(&eth, &bytes) {
-                            println!(
-                                "Interface {}: Failed to handle packet: {}",
-                                self.mac_addr, err
-                            );
-                        }
-                    }
-                },
+            for event in events.iter() {
+                running = self.on_poll_event(event, &network_rx);
+            }
+        }
+    }
+
+    fn on_poll_event(&mut self, _event: &Event, network_rx: &Receiver<NetworkRecvPayload>) -> bool {
+        loop {
+            if !self.perform_control() {
+                return false;
+            }
+            match network_rx.try_recv() {
+                Ok(NetworkRecvPayload::Packet(bytes)) => self.recv(bytes),
                 Err(mpsc::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    break;
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     println!("Interface {} disconnected", self.mac_addr);
-                    running = false;
+                    return false;
                 }
             }
-
             self.perform_timers();
         }
+        true
     }
 
     fn perform_control(&mut self) -> bool {
@@ -276,23 +297,7 @@ impl InterfaceWorker {
                     count,
                     interval,
                     reply,
-                } => {
-                    let session = self.ping_manager.ping(target, count, interval);
-                    _ = reply.send(Ok(session));
-
-                    // let echo_request = ICMPMessage::new_echo_request(None, 1);
-                    // if let Err(err) = self.send_ipv4(
-                    //     target,
-                    //     Ipv4Addr::UNSPECIFIED,
-                    //     IPProtocolTypes::ICMP,
-                    //     echo_request,
-                    // ) {
-                    //     eprintln!(
-                    //         "Interface {}: Failed to ping {}: {}",
-                    //         self.mac_addr, target, err
-                    //     );
-                    // };
-                }
+                } => _ = reply.send(Ok(self.ping_manager.ping(target, count, interval))),
                 InterfaceControlMessage::Stop() => {
                     return false;
                 }
@@ -303,10 +308,18 @@ impl InterfaceWorker {
             use crate::protocols::arp::ArpState;
 
             for i in (0..self.ipv4_pending_addresses.len()).rev() {
-                match self.arp_table.request(self.ipv4_pending_addresses[i].0) {
+                match self
+                    .arp_table
+                    .request(self.ipv4_pending_addresses[i].0, Ipv4Addr::UNSPECIFIED)
+                {
                     ArpState::PendingWait => {}
-                    ArpState::PendingRetry | ArpState::ResolvedStale(_) => {
-                        _ = self.send_arp_request(self.ipv4_pending_addresses[i].0);
+                    ArpState::PendingRetry { .. }
+                    | ArpState::ResolvedStale(_)
+                    | ArpState::Restart => {
+                        self.send_arp_request(
+                            self.ipv4_pending_addresses[i].0,
+                            Ipv4Addr::UNSPECIFIED,
+                        );
                     }
                     ArpState::Timeout => {
                         let (addr, mask, reply) = self.ipv4_pending_addresses.remove(i);
@@ -314,7 +327,7 @@ impl InterfaceWorker {
                         self.ipv4_route_table
                             .insert_or_update(addr & mask, mask, addr, None);
                         _ = reply.send(Ok(()));
-                        _ = self.send_gratuitous_arp(addr);
+                        self.send_gratuitous_arp(addr);
                     }
                     ArpState::Resolved(_) => {
                         let (_, _, reply) = self.ipv4_pending_addresses.remove(i);
@@ -328,12 +341,7 @@ impl InterfaceWorker {
     }
 
     fn handle_ipv4_address_add(&mut self, addr: Ipv4Addr, prefix: u8, reply: ResultSender<()>) {
-        let arp = ArpMessage::request(self.mac_addr, addr);
-        let ethernet = arp.create_ethernet();
-        if let Err(err) = self.send((ethernet, arp)) {
-            _ = reply.send(Err(Error::AddressCheckFailed(err)));
-            return;
-        }
+        self.send_arp_request(addr, Ipv4Addr::UNSPECIFIED);
 
         self.ipv4_pending_addresses
             .push((addr, prefix_to_mask(prefix), reply));
@@ -376,6 +384,7 @@ impl InterfaceWorker {
     fn perform_timers(&mut self) {
         self.perform_arp_timers();
         for (target, message) in self.ping_manager.perform_timers() {
+            trace!("ping managed asked us to send to {}: {:?}", target, message);
             self.send_ipv4(
                 target,
                 Ipv4Addr::UNSPECIFIED,
@@ -386,25 +395,26 @@ impl InterfaceWorker {
     }
 
     fn perform_arp_timers(&mut self) {
-        for ip in self.arp_table.pending() {
-            match self.arp_table.request(ip) {
+        for (ip, source) in self.arp_table.pending() {
+            match self.arp_table.request(ip, source) {
                 ArpState::PendingWait => {} // Continue to wait
-                ArpState::PendingRetry => {
-                    _ = self.send_arp_request(ip);
+                ArpState::PendingRetry { source } => {
+                    self.send_arp_request(ip, source);
                 }
                 // Look, I don't quite know how we would hit ResolvedStale here, but...
                 ArpState::Resolved(mac) | ArpState::ResolvedStale(mac) => {
                     if let Some(mut queue) = self.ipv4_send_buffer.remove(&ip) {
                         for pending in queue.drain(..) {
-                            _ = self.send_ethernet(mac, EtherType::IPv4, pending);
+                            self.send_ethernet(mac, EtherType::IPv4, pending);
                         }
                     }
                     // TODO Whatever else is needed now the address has been resovled - not sure what that is
                 }
-                ArpState::Timeout => {
+                // Restart is when the Timeout has gone stale or the Resolved has gone through stale out the other side
+                ArpState::Timeout | ArpState::Restart => {
                     if let Some(mut queue) = self.ipv4_send_buffer.remove(&ip) {
                         for (ipv4header, payload) in queue.drain(..) {
-                            _ = self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
+                            self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
                                 code: DestinationUnreachableCode::HostUnreachable,
                                 ipv4header,
                                 datagram: payload.slice(..ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH),
@@ -416,7 +426,7 @@ impl InterfaceWorker {
         }
     }
 
-    fn send(&self, packet: impl WriteToBuffer) -> io::Result<usize> {
+    fn send(&self, packet: impl WriteToBuffer) {
         assert!(packet.encoded_length() <= self.mtu);
 
         let mut buffer = bytes::BytesMut::with_capacity(self.mtu);
@@ -425,43 +435,14 @@ impl InterfaceWorker {
 
         let buffer = buffer.freeze();
 
-        if do_log() {
-            // this next part should be behind some kind of debug
-            let rem = &buffer.clone();
-            let e = EthernetHeader::from_bytes(rem)?;
-            let rem = &rem.slice(e.len()..);
-
-            print_outgoing(1, &e);
-            match e.ether_type() {
-                EtherType::ARP => {
-                    let a = ArpMessage::from_bytes(rem)?;
-                    print_outgoing(2, &a);
-                }
-                EtherType::IPv4 => {
-                    let ip = IPv4Header::from_bytes(rem)?;
-                    let rem = &rem.slice(ip.len()..);
-                    print_outgoing(2, &ip);
-                    match ip.protocol() {
-                        IPProtocolTypes::ICMP => {
-                            let icmp = ICMPMessage::from_bytes(rem)?;
-                            print_outgoing(2, &icmp);
-                        }
-                        IPProtocolTypes::UDP => {}
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
+        if tracing::enabled!(tracing::Level::TRACE) {
+            parse_and_log(&buffer);
         }
 
-        let (send, recv) = oneshot::channel();
-
-        self.network
-            .send
-            .send(NetworkSendPayload::Packet(buffer.clone(), send))
-            .map_err(io::Error::other)?;
-
-        recv.recv().map_err(io::Error::other)?
+        _ = self
+            .network_send
+            .send(NetworkSendPayload::Packet(buffer))
+            .map_err(io::Error::other);
     }
 
     fn send_ethernet(
@@ -469,7 +450,7 @@ impl InterfaceWorker {
         destination: MacAddr,
         ether_type: EtherType,
         payload: impl WriteToBuffer,
-    ) -> io::Result<usize> {
+    ) {
         let header = EthernetHeader::new(ether_type, self.mac_addr, destination);
 
         // Ethernet frames are caped at MTU
@@ -504,7 +485,7 @@ impl InterfaceWorker {
         let route = match self.ipv4_route_table.lookup(destination) {
             Some(route) => route,
             None => {
-                _ = self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
+                self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
                     code: NetUnreachable,
                     ipv4header: raw_header,
                     datagram: payload.slice(..ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH),
@@ -512,63 +493,83 @@ impl InterfaceWorker {
                 return;
             }
         };
+        let source = source.or_unspecified(route.source);
 
-        let header = IPv4Header::new(
-            protocol,
-            source.or_unspecified(route.source),
-            destination,
-            payload.len() as u16,
-        );
+        let header = IPv4Header::new(protocol, source, destination, payload.len() as u16);
 
         let next_hop = route.next_hop.unwrap_or(destination);
 
-        let arp_state = self.arp_table.request(next_hop);
+        let arp_state = self.arp_table.request(next_hop, source);
+        trace!("arp table said {:?} for {}", arp_state, next_hop);
+
         // Check if we need to send an ARP request
         match arp_state {
-            ArpState::PendingRetry | ArpState::ResolvedStale(_) => {
-                _ = self.send_arp_request(next_hop);
+            ArpState::PendingRetry { source } => self.send_arp_request(next_hop, source),
+            ArpState::ResolvedStale(_) | ArpState::Restart => {
+                self.send_arp_request(next_hop, source)
             }
             _ => {}
         }
 
         match arp_state {
-            ArpState::PendingRetry | ArpState::PendingWait => {
+            ArpState::PendingRetry { .. } | ArpState::PendingWait | ArpState::Restart => {
+                trace!("so we buffer the message");
                 self.ipv4_send_buffer
                     .entry(next_hop)
                     .or_default()
                     .push_back((header, payload));
             }
             ArpState::Resolved(dest_mac) | ArpState::ResolvedStale(dest_mac) => {
-                _ = self.send_ethernet(dest_mac, EtherType::IPv4, (header, payload));
+                trace!("so we send the message");
+                self.send_ethernet(dest_mac, EtherType::IPv4, (header, payload));
             }
             ArpState::Timeout => {
-                _ = self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
+                trace!("so we notify unreachable");
+                self.recv_ipv4_icmp_unreachable(&DestinationUnreachableMessage {
                     code: HostUnreachable,
                     ipv4header: raw_header,
                     datagram: payload.slice(..ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH),
                 });
-                return;
             }
         };
     }
 
-    fn recv(&mut self, ethernet: &EthernetHeader, bytes: &bytes::Bytes) -> io::Result<()> {
-        print_incoming(1, ethernet);
+    fn recv(&mut self, frame: bytes::Bytes) {
+        let ethernet_header = match crate::protocols::ethernet::EthernetHeader::from_bytes(&frame) {
+            Ok(ethernet_header) => ethernet_header,
+            Err(e) => {
+                debug!("failed to parse ethernet header: {}", e);
+                return;
+            }
+        };
+        let ethernet_payload = frame.slice(ethernet_header.encoded_length()..);
 
-        match ethernet.ether_type() {
-            EtherType::ARP => self.recv_arp(bytes),
-            EtherType::IPv4 => self.recv_ipv4(ethernet, bytes),
-            EtherType::IPv6 => Ok(()),
-            t => Err(io::Error::other(format!(
-                "unsupported ethernet type: {:?}",
-                t
-            ))),
+        trace_span!(
+            "recv",
+            ethernet_source = ethernet_header.source_address().to_string(),
+            ethernet_destination = ethernet_header.destination_address().to_string(),
+        );
+        trace!("Incoming Ethernet header: {:?}", ethernet_header);
+
+        match ethernet_header.ether_type() {
+            EtherType::ARP => self.recv_arp(ethernet_payload),
+            EtherType::IPv4 => self.recv_ipv4(ethernet_header, ethernet_payload),
+            EtherType::IPv6 => {
+                // TODO
+            }
+            t => debug!("unsupported ethernet type: {:?}", t),
         }
     }
 
-    fn recv_arp(&mut self, bytes: &bytes::Bytes) -> io::Result<()> {
-        let arp = ArpMessage::from_bytes(bytes)?;
-        print_incoming(2, &arp);
+    fn recv_arp(&mut self, bytes: bytes::Bytes) {
+        let arp = match ArpMessage::from_bytes(&bytes) {
+            Ok(arp) => arp,
+            Err(e) => {
+                debug!("failed to parse arp message: {}", e);
+                return;
+            }
+        };
+        trace!("Incoming ARP: {:?}", arp);
 
         // https://datatracker.ietf.org/doc/rfc826/ Packet Reception
 
@@ -586,42 +587,75 @@ impl InterfaceWorker {
 
             if arp.operation() == Operation::Request {
                 let reply = arp.reply(self.mac_addr, arp.target_addr());
-                self.send_ethernet(reply.target_mac(), EtherType::ARP, reply)?;
+                self.send_ethernet(reply.target_mac(), EtherType::ARP, reply);
             }
         }
 
         if merged && let Some(mut queue) = self.ipv4_send_buffer.remove(&arp.source_addr()) {
+            trace!(
+                "resolved {} draining {} pending messages",
+                arp.source_addr(),
+                queue.len()
+            );
+
             for pending in queue.drain(..) {
-                self.send_ethernet(arp.source_mac(), EtherType::IPv4, pending)?;
+                self.send_ethernet(arp.source_mac(), EtherType::IPv4, pending);
             }
         }
-
-        Ok(())
     }
 
-    fn recv_ipv4(&mut self, ethernet: &EthernetHeader, bytes: &bytes::Bytes) -> io::Result<()> {
-        let ip = IPv4Header::from_bytes(bytes)?;
-        let payload = &bytes.slice(ip.len()..);
-        print_incoming(2, &ip);
+    fn recv_ipv4(&mut self, ethernet: EthernetHeader, bytes: bytes::Bytes) {
+        let ip = match IPv4Header::from_bytes(&bytes) {
+            Ok(ip) => ip,
+            Err(e) => {
+                debug!("failed to parse ipv4 header: {}", e);
+                return;
+            }
+        };
 
-        self.arp_table
+        let payload = &bytes.slice(ip.encoded_length()..);
+
+        trace_span!(
+            "recv ipv4",
+            ipv4_source = ip.source_address().to_string(),
+            ipv4_destination = ip.destination_address().to_string()
+        );
+        trace!("Incoming IPv4 header: {:?}", ip);
+
+        let merged = self
+            .arp_table
             .update_or_insert(ethernet.source_address(), ip.source_address());
+        let source_address = ip.source_address();
 
         match ip.protocol() {
-            IPProtocolTypes::ICMP => self.recv_ipv4_icmp(ip, payload),
-            IPProtocolTypes::UDP => Ok(()),
-            IPProtocolTypes::TCP => Ok(()),
-            _ => Ok(()),
+            IPProtocolTypes::ICMP => _ = self.recv_ipv4_icmp(ip, payload),
+            IPProtocolTypes::UDP => {
+                // todo udp
+            }
+            IPProtocolTypes::TCP => {
+                // todo tcp
+            }
+            _ => {
+                // protocol we don't care about so drop it
+            }
+        };
+
+        if merged && let Some(mut queue) = self.ipv4_send_buffer.remove(&source_address) {
+            for pending in queue.drain(..) {
+                _ = self.send_ethernet(ethernet.source_address(), EtherType::IPv4, pending);
+            }
         }
     }
 
-    fn recv_ipv4_icmp(
-        &mut self,
-        ipv4_header: IPv4Header,
-        payload: &bytes::Bytes,
-    ) -> io::Result<()> {
-        let icmp = ICMPMessage::from_bytes(payload)?;
-        print_incoming(3, &icmp);
+    fn recv_ipv4_icmp(&mut self, ipv4_header: IPv4Header, payload: &bytes::Bytes) {
+        let icmp = match ICMPMessage::from_bytes(payload) {
+            Ok(icmp) => icmp,
+            Err(e) => {
+                debug!("failed to parse icmp message: {}", e);
+                return;
+            }
+        };
+        trace!("Incoming IPv4 ICMP: {:?}", icmp);
 
         match &icmp.message {
             ICMPMessageTypes::Echo(echo) => {
@@ -636,21 +670,16 @@ impl InterfaceWorker {
             ICMPMessageTypes::EchoReply(reply) => {
                 self.ping_manager.on_echo_reply(ipv4_header, reply);
             }
-            ICMPMessageTypes::DestinationUnreachable(m) => self.recv_ipv4_icmp_unreachable(m)?,
+            ICMPMessageTypes::DestinationUnreachable(m) => self.recv_ipv4_icmp_unreachable(m),
             _ => {
                 // TODO we need to parse the identifying data out of the control message's data and then
                 // forward it to the protocol manager
                 eprintln!("CONTROL MESSAGE: {:?}", icmp);
             }
         }
-
-        Ok(())
     }
 
-    fn recv_ipv4_icmp_unreachable(
-        &mut self,
-        unreachable: &DestinationUnreachableMessage,
-    ) -> io::Result<()> {
+    fn recv_ipv4_icmp_unreachable(&mut self, unreachable: &DestinationUnreachableMessage) {
         match unreachable.ipv4header.protocol() {
             IPProtocolTypes::ICMP => {
                 self.ping_manager.on_unreachable(unreachable);
@@ -665,31 +694,24 @@ impl InterfaceWorker {
                 );
             }
         }
-
-        Ok(())
     }
 
-    fn send_gratuitous_arp(&self, ipv4addr: Ipv4Addr) -> std::io::Result<()> {
+    fn send_gratuitous_arp(&self, ipv4addr: Ipv4Addr) {
         let arp = ArpMessage::gratuitous(self.mac_addr, ipv4addr);
-        self.send_ethernet(arp.target_mac(), EtherType::ARP, arp)?;
-
-        Ok(())
+        self.send_ethernet(arp.target_mac(), EtherType::ARP, arp);
     }
 
-    fn send_arp_request(&mut self, ipv4addr: Ipv4Addr) -> std::io::Result<()> {
-        if self.arp_table.can_send_request(ipv4addr) {
-            let arp = ArpMessage::request(self.mac_addr, ipv4addr);
-            self.send_ethernet(arp.target_mac(), EtherType::ARP, arp)?;
+    fn send_arp_request(&mut self, target_ipv4: Ipv4Addr, source_ipv4: Ipv4Addr) {
+        if self.arp_table.can_send_request(target_ipv4, source_ipv4) {
+            let arp = ArpMessage::request(self.mac_addr, target_ipv4, source_ipv4);
+            self.send_ethernet(arp.target_mac(), EtherType::ARP, arp);
         }
-
-        Ok(())
     }
 }
 
 impl Drop for InterfaceWorker {
     fn drop(&mut self) {
-        self.network
-            .send
+        self.network_send
             .send(NetworkSendPayload::Closed(self.mac_addr))
             .expect("send closed");
     }
@@ -713,18 +735,55 @@ impl OrUnspecified for Ipv4Addr {
     }
 }
 
-static DO_LOG_MESSAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-#[inline]
-fn do_log() -> bool {
-    *DO_LOG_MESSAGES.get_or_init(|| std::env::var("LOG_MESSAGES").is_ok())
-}
-fn print_outgoing(level: usize, item: &impl std::fmt::Debug) {
-    if do_log() {
-        println!("{} {:?}", '<'.to_string().repeat(level), item);
-    }
-}
-fn print_incoming(level: usize, item: &impl std::fmt::Debug) {
-    if do_log() {
-        println!("{} {:?}", '>'.to_string().repeat(level), item);
+fn parse_and_log(rem: &bytes::Bytes) {
+    // this next part should be behind some kind of debug
+    let e = match EthernetHeader::from_bytes(rem) {
+        Ok(e) => e,
+        Err(e) => {
+            error!("failed to parse outgoing ethernet header: {}", e);
+            return;
+        }
+    };
+    trace!("Outgoing ethernet header: {:?}", e);
+
+    let rem = &rem.slice(e.len()..);
+
+    match e.ether_type() {
+        EtherType::ARP => {
+            let a = match ArpMessage::from_bytes(rem) {
+                Ok(a) => a,
+                Err(e) => {
+                    error!("failed to parse outgoing arp message: {}", e);
+                    return;
+                }
+            };
+            trace!("Outgoing arp message: {:?}", a);
+        }
+        EtherType::IPv4 => {
+            let ip = match IPv4Header::from_bytes(rem) {
+                Ok(ip) => ip,
+                Err(e) => {
+                    error!("failed to parse outgoing ipv4 header: {}", e);
+                    return;
+                }
+            };
+            trace!("Outgoing IPv4 header: {:?}", ip);
+            let rem = &rem.slice(ip.len()..);
+            match ip.protocol() {
+                IPProtocolTypes::ICMP => {
+                    let icmp = match ICMPMessage::from_bytes(rem) {
+                        Ok(icmp) => icmp,
+                        Err(e) => {
+                            error!("failed to parse outgoing icmp message: {}", e);
+                            return;
+                        }
+                    };
+                    trace!("Outgoing ICMP message: {:?}", icmp);
+                }
+                IPProtocolTypes::UDP => {}
+                _ => {}
+            }
+        }
+        _ => {}
     }
 }

@@ -110,13 +110,13 @@ impl ArpMessage {
         }
     }
 
-    pub fn request(requester: MacAddr, ipv4: Ipv4Addr) -> Self {
+    pub fn request(requester: MacAddr, target_ipv4: Ipv4Addr, sender_ipv4: Ipv4Addr) -> Self {
         ArpMessage {
             operation: Operation::Request,
             sender_hardware_addr: requester,
-            sender_protocol_addr: Ipv4Addr::new(0, 0, 0, 0),
+            sender_protocol_addr: sender_ipv4,
             target_hardware_addr: MAC_BROADCAST,
-            target_protocol_addr: ipv4,
+            target_protocol_addr: target_ipv4,
         }
     }
 
@@ -235,7 +235,10 @@ impl common::WriteToBuffer for ArpMessage {
 pub enum ArpState {
     /// ARP Request is pending but above timeout, send a new request and let us know
     /// this is also the initial resolve state if no existing entry is found
-    PendingRetry,
+    PendingRetry {
+        source: Ipv4Addr,
+    },
+    Restart,
     /// ARP Request is pending but below timeout, hold your horses
     PendingWait,
     /// If Pending wait time exced and max retry exced
@@ -251,6 +254,7 @@ enum ArpTableEntry {
     Pending {
         since: Instant,
         retry_count: u8,
+        source: Ipv4Addr,
     },
     Resolved {
         last_seen: Instant,
@@ -274,14 +278,16 @@ const ARP_LIFETIME: std::time::Duration = std::time::Duration::from_secs(ARP_LIF
 const ARP_LIFETIME_STALE_SEC: u64 = 60;
 
 impl ArpTable {
-    pub fn update_or_insert(&mut self, mac: MacAddr, ipv4: Ipv4Addr) {
-        self.table.insert(
-            ipv4,
-            ArpTableEntry::Resolved {
-                last_seen: Instant::now(),
-                address: mac,
-            },
-        );
+    pub fn update_or_insert(&mut self, mac: MacAddr, ipv4: Ipv4Addr) -> bool {
+        self.table
+            .insert(
+                ipv4,
+                ArpTableEntry::Resolved {
+                    last_seen: Instant::now(),
+                    address: mac,
+                },
+            )
+            .is_some()
     }
 
     pub fn update_only(&mut self, mac: MacAddr, ipv4: Ipv4Addr) -> bool {
@@ -301,66 +307,82 @@ impl ArpTable {
         self.update_or_insert(arp.sender_hardware_addr, arp.sender_protocol_addr);
     }
 
-    pub fn request(&mut self, ipv4addr: Ipv4Addr) -> ArpState {
-        match self
-            .table
-            .entry(ipv4addr)
-            .or_insert(ArpTableEntry::Pending {
-                since: Instant::now(),
-                retry_count: 0,
-            }) {
-            ArpTableEntry::Pending { retry_count, since } => {
-                if since.elapsed() > ARP_REQUEST_TIMEOUT {
-                    if *retry_count >= ARP_REQUEST_MAX_RETRY {
-                        self.table.insert(
-                            ipv4addr,
-                            ArpTableEntry::Timeout {
+    pub fn request(&mut self, target: Ipv4Addr, source: Ipv4Addr) -> ArpState {
+        match self.table.entry(target) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => match entry.get() {
+                ArpTableEntry::Pending {
+                    retry_count,
+                    since,
+                    source,
+                } => {
+                    if since.elapsed() > ARP_REQUEST_TIMEOUT {
+                        if *retry_count >= ARP_REQUEST_MAX_RETRY {
+                            entry.insert(ArpTableEntry::Timeout {
                                 since: Instant::now(),
-                            },
-                        );
+                            });
 
-                        ArpState::Timeout
+                            ArpState::Timeout
+                        } else {
+                            ArpState::PendingRetry { source: *source }
+                        }
                     } else {
-                        ArpState::PendingRetry
+                        ArpState::PendingWait
                     }
-                } else {
-                    ArpState::PendingWait
                 }
-            }
-            ArpTableEntry::Timeout { since } => {
-                if since.elapsed() > ARP_LIFETIME {
-                    self.table.remove(&ipv4addr);
-                    ArpState::PendingRetry
-                } else {
-                    ArpState::Timeout
+                ArpTableEntry::Timeout { since } => {
+                    if since.elapsed() > ARP_LIFETIME {
+                        entry.remove();
+                        ArpState::Restart
+                    } else {
+                        ArpState::Timeout
+                    }
                 }
-            }
-            ArpTableEntry::Resolved { last_seen, address } => match last_seen.elapsed().as_secs() {
-                ARP_LIFETIME_STALE_SEC.. => {
-                    self.table.remove(&ipv4addr);
-                    ArpState::PendingRetry
-                }
-                ARP_LIFETIME_SEC..ARP_LIFETIME_STALE_SEC => ArpState::ResolvedStale(*address),
-                ..ARP_LIFETIME_SEC => ArpState::Resolved(*address),
+                ArpTableEntry::Resolved { last_seen, address } => match last_seen
+                    .elapsed()
+                    .as_secs()
+                {
+                    ARP_LIFETIME_STALE_SEC.. => {
+                        entry.remove();
+                        ArpState::Restart
+                    }
+                    ARP_LIFETIME_SEC..ARP_LIFETIME_STALE_SEC => ArpState::ResolvedStale(*address),
+                    ..ARP_LIFETIME_SEC => ArpState::Resolved(*address),
+                },
             },
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(ArpTableEntry::Pending {
+                    since: Instant::now(),
+                    retry_count: 0,
+                    source,
+                });
+                ArpState::PendingRetry { source }
+            }
         }
     }
 
-    pub fn pending(&self) -> Vec<Ipv4Addr> {
+    pub fn pending(&self) -> Vec<(Ipv4Addr, Ipv4Addr)> {
         self.table
             .iter()
-            .filter(|(_, entry)| matches!(entry, ArpTableEntry::Pending { .. }))
-            .map(|(ip, _)| *ip)
+            .filter_map(|(ip, entry)| {
+                if let ArpTableEntry::Pending { source, .. } = entry {
+                    Some((*ip, *source))
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
-    pub fn can_send_request(&mut self, ipv4addr: Ipv4Addr) -> bool {
+    pub fn can_send_request(&mut self, target: Ipv4Addr, source: Ipv4Addr) -> bool {
         let now = Instant::now();
         let entry = self
             .table
-            .entry(ipv4addr)
+            .entry(target)
             .and_modify(|mut entry| {
-                if let ArpTableEntry::Pending { retry_count, since } = &mut entry {
+                if let ArpTableEntry::Pending {
+                    retry_count, since, ..
+                } = &mut entry
+                {
                     *retry_count += 1;
                     *since = now;
                 }
@@ -368,29 +390,8 @@ impl ArpTable {
             .or_insert(ArpTableEntry::Pending {
                 since: now,
                 retry_count: 0,
+                source,
             });
         matches!(entry, ArpTableEntry::Pending { .. })
     }
-
-    // pub fn handle(&mut self, recv_arp: ArpMessage, our_mac: MacAddr) -> Result<ArpMessage, Error> {
-    //     self.table
-    //         .entry(recv_arp.sender_hardware_addr)
-    //         .or_default()
-    //         .insert(recv_arp.sender_protocol_addr);
-    //
-    //     Ok(recv_arp.reply(our_mac, recv_arp.target_protocol_addr))
-    // }
-
-    // let mut count = 0;
-    //     count += reply_ether.write(&mut buffer[..])?;
-    //     count += reply_arp.write(&mut buffer[count..])?;
-
-    // let r = EthernetMessage::from_bytes(&buffer[..count]);
-    // let ra = ArpMessage::from_bytes(r.payload()).unwrap();
-
-    // println!("< {:?}", r);
-    // println!("< {:?}", ra);
-
-    //     Ok(count)
-    // }
 }

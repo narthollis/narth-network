@@ -1,0 +1,18 @@
+[package]
+name = "narth-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tun-rs = { version = "2.8.3", default-features = false, features = [] }
+bitmatch = { version = "0.1.1" }
+internet-checksum = "0.2.1"
+fastrand = "2.4.1"
+bytes = { version = "1.11.1" }
+thiserror = "2.0.18"
+mio = { version = "1.2.1", features = ["os-poll", "os-ext"] }
+
+tracing = { version = "0.1.44" }

@@ -197,8 +197,6 @@ pub struct EchoMessageDataUnix {
     pub(crate) monotonic_instant: Option<Duration>,
 }
 
-pub(crate) static BOOT_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
 impl EchoMessageDataUnix {
     const LENGTH: usize = 56;
     const EMPTY: [u8; Self::LENGTH] = const {
@@ -210,18 +208,19 @@ impl EchoMessageDataUnix {
         }
         e
     };
+}
 
-    pub fn new() -> Self {
+impl Default for EchoMessageDataUnix {
+    fn default() -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
 
         EchoMessageDataUnix {
             since_epoc: now,
-            monotonic_instant: Some(
-                std::time::Instant::now()
-                    .duration_since(*BOOT_TIME.get_or_init(|| std::time::Instant::now())),
-            ),
+            monotonic_instant: crate::runtime::BOOT_TIME
+                .get()
+                .map(|x| std::time::Instant::now().duration_since(*x)),
         }
     }
 }
@@ -341,7 +340,7 @@ impl ICMPMessage {
             message: ICMPMessageTypes::Echo(EchoMessage {
                 identifier,
                 sequence_number: sequence,
-                data: EchoMessageData::UnixLike(EchoMessageDataUnix::new()),
+                data: EchoMessageData::UnixLike(EchoMessageDataUnix::default()),
             }),
         }
     }

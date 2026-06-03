@@ -76,7 +76,7 @@ impl Display for EtherType {
     }
 }
 
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Copy)]
 pub struct EthernetHeader {
     destination_address: MacAddr,
     source_address: MacAddr,
@@ -85,6 +85,8 @@ pub struct EthernetHeader {
 }
 
 impl EthernetHeader {
+    pub const MIN_LENGTH: usize = 14;
+
     pub fn new(ether_type: EtherType, source: MacAddr, destination: MacAddr) -> Self {
         EthernetHeader {
             destination_address: destination,
@@ -95,6 +97,13 @@ impl EthernetHeader {
     }
 
     pub fn from_bytes(bytes: &bytes::Bytes) -> std::io::Result<Self> {
+        if bytes.len() < Self::MIN_LENGTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "ethernet header too short",
+            ));
+        }
+
         let mut ether_type = bytes[12..14].try_into()?;
         let mut vlan = None;
 

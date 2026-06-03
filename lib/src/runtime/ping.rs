@@ -1,17 +1,17 @@
 use crate::protocols::ipv4::IPv4Header;
-use crate::protocols::ipv4::icmp::{
-    BOOT_TIME, DestinationUnreachableMessage, EchoMessage, ICMPMessage,
-};
+use crate::protocols::ipv4::icmp::{DestinationUnreachableMessage, EchoMessage, ICMPMessage};
 use std::ops::Sub;
 use std::time::Instant;
 
 /* region Public */
+#[derive(Debug)]
 pub enum PingResultStatus {
     Success(Option<std::time::Duration>),
     Timeout,
     Unreachable(&'static str), // TODO expand this to carry Host/Network/HostAndNetwork/etc.
 }
 
+#[derive(Debug)]
 pub struct PingResult {
     pub sequence: usize,
     pub target: std::net::Ipv4Addr,
@@ -200,6 +200,7 @@ impl PingManager {
             entry.last_sent = Some(now);
             entry.sent_count = entry.sent_count.wrapping_add(1);
 
+            tracing::trace!("created new ping request to {}", entry.target);
             Some((
                 entry.target,
                 ICMPMessage::new_echo_request(entry.identifier, sequence),
@@ -224,11 +225,12 @@ impl PingManager {
             let duration = message.parse_unix_data().ok().and_then(|data| {
                 data.monotonic_instant.map(|m| {
                     {
-                        BOOT_TIME
+                        crate::runtime::BOOT_TIME
                             .get()
                             .map(|boot| Instant::now().duration_since(*boot).sub(m))
                     }
                     .unwrap_or_else(|| {
+                        println!("from system");
                         std::time::SystemTime::now()
                             .duration_since(std::time::SystemTime::UNIX_EPOCH)
                             .unwrap()

@@ -10,6 +10,8 @@ mod route_table;
 
 pub use ping::PingResultStatus;
 
+pub(crate) static BOOT_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 pub trait NetworkBridge {
     type Error: core::fmt::Debug;
 

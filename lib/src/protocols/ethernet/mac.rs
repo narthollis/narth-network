@@ -10,6 +10,10 @@ impl MacAddr {
         MacAddr(a, b, c, d, e, f)
     }
 
+    pub fn from_octets(bytes: [u8; 6]) -> Self {
+        MacAddr(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])
+    }
+
     pub fn is_broadcast(&self) -> bool {
         self.eq(&BROADCAST)
     }
