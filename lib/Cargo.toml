@@ -6,13 +6,36 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+default = ["ping-statistics"]
+ping-statistics = ["dep:hdrhistogram"]
+
 [dependencies]
-tun-rs = { version = "2.8.3", default-features = false, features = [] }
 bitmatch = { version = "0.1.1" }
 internet-checksum = "0.2.1"
 fastrand = "2.4.1"
 bytes = { version = "1.11.1" }
 thiserror = "2.0.18"
 mio = { version = "1.2.1", features = ["os-poll", "os-ext"] }
-
 tracing = { version = "0.1.44" }
+hdrhistogram = { version = "7.5.4", optional = true }
+ringbuf = { version = "0.5.0" }
+
+[lints.rust]
+missing_debug_implementations = "warn"
+rust_2018_idioms = "warn"
+
+missing_copy_implementations = "warn"
+#missing_docs = # "warn" maybe someday...
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 } # strict code style
+nursery = { level = "warn", priority = -1 } # stuff that's maybe not reqdy yet
+
+todo = "warn" # "deny" nah, i'm still developing
+unwrap_used = "deny"
+panic = "deny"
+
+missing_errors_doc = "allow"
+missing_panic_doc = "allow"

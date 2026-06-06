@@ -29,13 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         seq_endpoint
     );
 
-    {
-        let session_span = tracing::info_span!("connection_handler", remote_ip = "127.0.0.1");
-        let _guard = session_span.enter();
-        tracing::info!("about to run stuff");
-
-        s_main()?;
-    }
+    s_main()?;
 
     tracing::info!("Application logic completed safely.");
 
@@ -145,8 +139,8 @@ fn s_main() -> std::io::Result<()> {
 
 fn ping(interface: &Interface, addr: Ipv4Addr, count: usize) {
     match interface.ping(addr, count.into(), None) {
-        Ok(ping) => {
-            for result in ping {
+        Ok(mut ping) => {
+            for result in ping.into_iter() {
                 match result.status {
                     narth_net::runtime::PingResultStatus::Success(Some(duration)) => {
                         println!(
@@ -176,7 +170,19 @@ fn ping(interface: &Interface, addr: Ipv4Addr, count: usize) {
                     }
                 }
             }
-            println!("Ping finished");
+
+            if let Some(stats) = &ping.stats {
+                println!(
+                    "Ping finished - Min: {:.4}ms Max: {:.4}ms Mean: {:.4}ms P95: {:.4}ms P99: {:.4}ms",
+                    stats.min() as f64 / 1_000_000.0,
+                    stats.max() as f64 / 1_000_000.0,
+                    stats.mean() / 1_000_000.0,
+                    stats.value_at_percentile(95.0) as f64 / 1_000_000.0,
+                    stats.value_at_percentile(99.0) as f64 / 1_000_000.0,
+                );
+            } else {
+                println!("Ping finished")
+            }
         }
         Err(e) => eprintln!("Failed to ping: {}", e),
     }

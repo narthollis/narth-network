@@ -1,41 +1,60 @@
 use crate::protocols::ipv4::IPv4Header;
 use crate::protocols::ipv4::icmp::{DestinationUnreachableMessage, EchoMessage, ICMPMessage};
-use std::ops::Sub;
 use std::time::Instant;
-
+use tracing::error;
 /* region Public */
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum PingResultStatus {
     Success(Option<std::time::Duration>),
     Timeout,
     Unreachable(&'static str), // TODO expand this to carry Host/Network/HostAndNetwork/etc.
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct PingResult {
     pub sequence: usize,
     pub target: std::net::Ipv4Addr,
     pub status: PingResultStatus,
 }
 
+#[derive(Debug)]
 pub struct PingSession {
     reply_rx: std::sync::mpsc::Receiver<(usize, PingResultStatus)>,
     control_tx: std::sync::mpsc::Sender<ControlMessage>,
     pub target: std::net::Ipv4Addr,
     key: PingEntryKey,
+
+    #[cfg(feature = "ping-statistics")]
+    pub stats: Option<hdrhistogram::Histogram<u64>>,
 }
 
 impl PingSession {
-    // TODO add fun stuff like impl Display and averaging and max/min etc.
+    // TODO add fun stuff like impl Display.
+    pub fn try_recv(&mut self) -> Option<PingResult> {
+        self.reply_rx.try_recv().ok().map(|(c, s)| self.map(c, s))
+    }
     pub fn recv(&mut self) -> Option<PingResult> {
-        self.reply_rx
-            .try_recv()
-            .ok()
-            .map(|(sequence, status)| PingResult {
-                sequence,
-                status,
-                target: self.target,
-            })
+        self.reply_rx.recv().ok().map(|(c, s)| self.map(c, s))
+    }
+
+    fn map(&mut self, sequence: usize, status: PingResultStatus) -> PingResult {
+        let result = PingResult {
+            sequence,
+            status,
+            target: self.target,
+        };
+
+        #[cfg(feature = "ping-statistics")]
+        if let PingResultStatus::Success(Some(duration)) = result.status {
+            let histogram = self.stats.get_or_insert_with(|| {
+                hdrhistogram::Histogram::new(3).expect("failed to create stats")
+            });
+            if let Err(err) = histogram.record(duration.as_nanos().try_into().unwrap_or(u64::MAX)) {
+                error!("failed to record ping stats: {err}");
+            }
+        }
+
+        result
     }
 
     pub fn stop(&self) {
@@ -43,18 +62,23 @@ impl PingSession {
     }
 }
 
-impl Iterator for PingSession {
+#[derive(Debug)]
+pub struct PingSessionIterator<'a> {
+    session: &'a mut PingSession,
+}
+impl Iterator for PingSessionIterator<'_> {
     type Item = PingResult;
-
     fn next(&mut self) -> Option<Self::Item> {
-        self.reply_rx
-            .recv()
-            .ok()
-            .map(|(sequence, status)| PingResult {
-                sequence,
-                status,
-                target: self.target,
-            })
+        self.session.recv()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut PingSession {
+    type Item = PingResult;
+    type IntoIter = PingSessionIterator<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        PingSessionIterator { session: self }
     }
 }
 
@@ -93,8 +117,17 @@ struct PingManagerEntry {
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 struct PingEntryKey(std::net::Ipv4Addr, u16);
 
+enum PingManagerEntryTimerResult {
+    Deadline(std::time::Instant),
+    Message {
+        deadline: std::time::Instant,
+        target: std::net::Ipv4Addr,
+        message: ICMPMessage,
+    },
+}
+
 #[derive(Debug)]
-pub(crate) struct PingManager {
+pub struct PingManager {
     sessions: std::collections::HashMap<PingEntryKey, PingManagerEntry>,
     control_rx: std::sync::mpsc::Receiver<ControlMessage>,
     control_tx: std::sync::mpsc::Sender<ControlMessage>,
@@ -142,10 +175,16 @@ impl PingManager {
             reply_rx: recv_rx,
             target,
             key: PingEntryKey(target, identifier),
+            stats: None,
         }
     }
 
-    pub(crate) fn perform_timers(&mut self) -> Vec<(std::net::Ipv4Addr, ICMPMessage)> {
+    pub(crate) fn perform_timers(
+        &mut self,
+    ) -> (
+        Option<std::time::Instant>,
+        Vec<(std::net::Ipv4Addr, ICMPMessage)>,
+    ) {
         while let Ok(control_message) = self.control_rx.try_recv() {
             match control_message {
                 ControlMessage::Stop(key) => {
@@ -155,26 +194,51 @@ impl PingManager {
         }
 
         let now = std::time::Instant::now();
+        let mut earliest_deadline: Option<std::time::Instant> = None;
 
         let request = self
             .sessions
             .iter_mut()
-            .filter_map(|(_, entry)| Self::process_timers_session(entry, now))
+            .filter_map(
+                |(_, entry)| match Self::process_timers_session(entry, now) {
+                    None => None,
+                    Some(PingManagerEntryTimerResult::Message {
+                        deadline,
+                        target,
+                        message,
+                    }) => {
+                        earliest_deadline = earliest_deadline
+                            .map(|dl| dl.min(deadline))
+                            .or(Some(deadline));
+
+                        Some((target, message))
+                    }
+                    Some(PingManagerEntryTimerResult::Deadline(deadline)) => {
+                        earliest_deadline = earliest_deadline
+                            .map(|dl| dl.min(deadline))
+                            .or(Some(deadline));
+                        None
+                    }
+                },
+            )
             .collect();
 
         self.garbage_collect();
 
-        request
+        (earliest_deadline, request)
     }
 
     fn process_timers_session(
         entry: &mut PingManagerEntry,
         now: std::time::Instant,
-    ) -> Option<(std::net::Ipv4Addr, ICMPMessage)> {
+    ) -> Option<PingManagerEntryTimerResult> {
         // Process Timeouts
         while let Some((_, sent_at)) = entry.pending.front() {
             if (now - *sent_at) > entry.timeout {
-                let (seq, _) = entry.pending.pop_front().unwrap();
+                let (seq, _) = entry
+                    .pending
+                    .pop_front()
+                    .expect("already checked front item now missing");
                 let _ = entry.recv_tx.send((
                     Self::unwrap_sequence(seq, entry.sent_count),
                     PingResultStatus::Timeout,
@@ -187,24 +251,30 @@ impl PingManager {
 
         // Check if we still have stuff to send (sent_count < count) AND if the send interval has passed
         // And now let's find out pending!
-        if match entry.count {
-            Some(c) => entry.sent_count < c,
-            None => true,
-        } && match entry.last_sent {
-            Some(last_sent) => now.duration_since(last_sent) > entry.interval,
-            None => true,
-        } {
-            let sequence = entry.sent_count as u16;
+        if entry.count.is_none_or(|count| entry.sent_count < count) {
+            if entry
+                .last_sent
+                .is_none_or(|last_sent| now.duration_since(last_sent) > entry.interval)
+            {
+                // Intentionally truncate sent-count to u16 sequence
+                #[allow(clippy::cast_possible_truncation)]
+                let sequence = entry.sent_count as u16;
 
-            entry.pending.push_back((sequence, now));
-            entry.last_sent = Some(now);
-            entry.sent_count = entry.sent_count.wrapping_add(1);
+                entry.pending.push_back((sequence, now));
+                entry.last_sent = Some(now);
+                entry.sent_count = entry.sent_count.wrapping_add(1);
 
-            tracing::trace!("created new ping request to {}", entry.target);
-            Some((
-                entry.target,
-                ICMPMessage::new_echo_request(entry.identifier, sequence),
-            ))
+                tracing::trace!("created new ping request to {}", entry.target);
+                Some(PingManagerEntryTimerResult::Message {
+                    deadline: now + entry.timeout,
+                    target: entry.target,
+                    message: ICMPMessage::new_echo_request(entry.identifier, sequence),
+                })
+            } else {
+                Some(PingManagerEntryTimerResult::Deadline(
+                    entry.last_sent.expect("unreachable") + entry.interval,
+                ))
+            }
         } else {
             None
         }
@@ -223,18 +293,18 @@ impl PingManager {
             _ = session.pending.remove(index);
 
             let duration = message.parse_unix_data().ok().and_then(|data| {
-                data.monotonic_instant.map(|m| {
+                data.monotonic_instant.and_then(|m| {
                     {
                         crate::runtime::BOOT_TIME
                             .get()
-                            .map(|boot| Instant::now().duration_since(*boot).sub(m))
+                            .and_then(|boot| Instant::now().duration_since(*boot).checked_sub(m))
                     }
-                    .unwrap_or_else(|| {
+                    .or_else(|| {
                         println!("from system");
                         std::time::SystemTime::now()
                             .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                            .unwrap()
-                            .sub(data.since_epoc)
+                            .expect("failed to get system time since UNIX_EPOCH")
+                            .checked_sub(data.since_epoc)
                     })
                 })
             });
@@ -262,19 +332,20 @@ impl PingManager {
             );
     }
 
-    fn unwrap_sequence(sequence: u16, sent: usize) -> usize {
+    const fn unwrap_sequence(sequence: u16, sent: usize) -> usize {
         // Compute shorted significant distance from sent count for the current sequence
 
         // Intentionally truncate the total sent to u16
+        #[allow(clippy::cast_possible_truncation)]
         let sent_u16 = sent as u16;
 
         // Compute the +/- distance on the u16 "ring"
-        let diff = sequence.wrapping_sub(sent_u16) as i16;
+        let diff = sequence.wrapping_sub(sent_u16).cast_signed();
 
         match diff {
             // sequence is ahead of send - so add diff to the counter to get the sequence
             // -- I'm not sure how this would ever be > 0 but match that for completeness also
-            0.. => sent.wrapping_add(diff as usize),
+            0.. => sent.wrapping_add(diff.cast_unsigned() as usize),
             // sequence is (as expected) behind so use unsinged_abs to turn the i16 into a clean u16
             // with the same logical value (-1 -> 1) then us a wrapping sub on our usize to get the
             // corrected sequence
@@ -286,10 +357,74 @@ impl PingManager {
 impl Default for PingManager {
     fn default() -> Self {
         let (control_tx, control_rx) = std::sync::mpsc::channel();
-        PingManager {
+        Self {
             sessions: std::collections::HashMap::default(),
             control_tx,
             control_rx,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exact_sequence_match() {
+        assert_eq!(PingManager::unwrap_sequence(0, 0), 0);
+        assert_eq!(PingManager::unwrap_sequence(500, 500), 500);
+        assert_eq!(PingManager::unwrap_sequence(65535, 65535), 65535);
+
+        // Exact match but sent has wrapped exactly once (1 epoch in)
+        assert_eq!(PingManager::unwrap_sequence(0, 65536), 65536);
+    }
+
+    #[test]
+    fn test_sequence_behind_no_wrap() {
+        // Sequence is lagging slightly behind sent
+        assert_eq!(PingManager::unwrap_sequence(10, 15), 10);
+        assert_eq!(PingManager::unwrap_sequence(65520, 65530), 65520);
+
+        // High epoch: Sent is 131080 (2 * 65536 + 8), sequence is 2
+        assert_eq!(PingManager::unwrap_sequence(2, 131080), 131074);
+    }
+
+    #[test]
+    fn test_sequence_ahead_no_wrap() {
+        // Sequence is slightly ahead of sent (e.g. tracking missed messages)
+        assert_eq!(PingManager::unwrap_sequence(15, 10), 15);
+        assert_eq!(PingManager::unwrap_sequence(65530, 65520), 65530);
+
+        // High epoch: Sent is 131074, sequence is 8
+        assert_eq!(PingManager::unwrap_sequence(8, 131074), 131080);
+    }
+
+    #[test]
+    fn test_sequence_behind_with_wrap() {
+        // Sent has just rolled over the u16 boundary to 65536 (u16 == 0)
+        // Sequence is lagging behind, still at the end of the previous epoch
+        assert_eq!(PingManager::unwrap_sequence(65530, 65536), 65530);
+
+        // Sent is at 65540 (u16 == 4), sequence is lagging at 65530
+        // Expected logical value is 65530
+        assert_eq!(PingManager::unwrap_sequence(65530, 65540), 65530);
+
+        // High epoch: Sent wrapped 100 times (6,553,600) + 5
+        let sent = (65536 * 100) + 5;
+        // Sequence is lagging by 10, so it's on the previous u16 boundary
+        assert_eq!(PingManager::unwrap_sequence(65531, sent), sent - 10);
+    }
+
+    #[test]
+    fn test_sequence_ahead_with_wrap() {
+        // Sent is near the boundary at 65530
+        // Sequence has rolled over the boundary to 5
+        // Expected value is 65536 + 5 = 65541
+        assert_eq!(PingManager::unwrap_sequence(5, 65530), 65541);
+
+        // High epoch: Sent wrapped 100 times minus 5
+        let sent = (65536 * 100) - 5;
+        // Sequence is ahead by 10, rolling over the boundary
+        assert_eq!(PingManager::unwrap_sequence(5, sent), sent + 10);
     }
 }

@@ -2,6 +2,7 @@ use crate::protocols::ethernet::mac::MacAddr;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 mod address_table;
+pub(in crate::runtime) mod buffer_pool;
 pub(in crate::runtime) mod common;
 pub mod interface;
 pub mod network;

@@ -86,9 +86,11 @@ pub struct EthernetHeader {
 
 impl EthernetHeader {
     pub const MIN_LENGTH: usize = 14;
+    pub const MAX_LENGTH: usize = 18;
 
-    pub fn new(ether_type: EtherType, source: MacAddr, destination: MacAddr) -> Self {
-        EthernetHeader {
+    #[must_use]
+    pub const fn new(ether_type: EtherType, source: MacAddr, destination: MacAddr) -> Self {
+        Self {
             destination_address: destination,
             source_address: source,
             ether_type,
@@ -128,36 +130,26 @@ impl EthernetHeader {
         })
     }
 
-    pub fn create_reply(&self, our_mac: MacAddr) -> EthernetHeader {
-        let mut reply = self.clone();
-
-        reply.destination_address = reply.source_address;
-        reply.source_address = our_mac;
-
-        reply
-    }
-
-    pub fn destination_address(&self) -> MacAddr {
+    #[must_use]
+    pub const fn destination_address(&self) -> MacAddr {
         self.destination_address
     }
-    pub fn source_address(&self) -> MacAddr {
+    #[must_use]
+    pub const fn source_address(&self) -> MacAddr {
         self.source_address
     }
-    pub fn ether_type(&self) -> EtherType {
+    #[must_use]
+    pub const fn ether_type(&self) -> EtherType {
         self.ether_type
-    }
-
-    pub fn len(&self) -> usize {
-        match self.vlan {
-            None => 14,
-            Some(_) => 18,
-        }
     }
 }
 
 impl WriteToBuffer for EthernetHeader {
     fn encoded_length(&self) -> usize {
-        self.len()
+        match self.vlan {
+            None => 14,
+            Some(_) => 18,
+        }
     }
 
     fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {

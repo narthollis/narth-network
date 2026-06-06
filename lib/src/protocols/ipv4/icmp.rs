@@ -3,7 +3,6 @@ use crate::common::WriteToBuffer;
 use crate::protocols::ipv4::IPv4Header;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
-use std::time::Duration;
 
 pub const ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH: usize = 64 / (u8::BITS as usize);
 
@@ -194,7 +193,7 @@ enum EchoMessageData {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct EchoMessageDataUnix {
     pub(crate) since_epoc: std::time::Duration,
-    pub(crate) monotonic_instant: Option<Duration>,
+    pub(crate) monotonic_instant: Option<std::time::Duration>,
 }
 
 impl EchoMessageDataUnix {
@@ -214,9 +213,9 @@ impl Default for EchoMessageDataUnix {
     fn default() -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
+            .expect("failed to get system time since UNIX_EPOCH");
 
-        EchoMessageDataUnix {
+        Self {
             since_epoc: now,
             monotonic_instant: crate::runtime::BOOT_TIME
                 .get()
@@ -263,25 +262,35 @@ impl TryFrom<&bytes::Bytes> for EchoMessageDataUnix {
         }
 
         // using unwrap because we verified length above
-        let sec = u64::from_ne_bytes(value[..8].try_into().unwrap());
-        let micros = u64::from_ne_bytes(value[8..16].try_into().unwrap());
+        let sec = u64::from_ne_bytes(
+            value[..8]
+                .try_into()
+                .expect("icmp echo parse got eof after length check"),
+        );
+        let micros = u64::from_ne_bytes(
+            value[8..16]
+                .try_into()
+                .expect("icmp echo parse got eof after length check"),
+        );
 
-        let nanos: u128 = sec as u128 * 1_000_000_000 + (micros * 1_000) as u128;
+        let nanos: u128 = u128::from(sec) * 1_000_000_000 + u128::from(micros * 1_000);
 
-        let since_epoc = Duration::from_nanos_u128(nanos);
+        let since_epoc = std::time::Duration::from_nanos_u128(nanos);
 
-        let maybe_monotonic_instant: [u8; 16] = value[16..32].try_into().unwrap();
+        let maybe_monotonic_instant: [u8; 16] = value[16..32]
+            .try_into()
+            .expect("icmp echo parse got eof after length check");
         let mut monotonic_instant = None;
         if maybe_monotonic_instant != Self::EMPTY[16..32] {
             let nanos = u128::from_ne_bytes(maybe_monotonic_instant);
             // It would be great to do some extra validation here we didn't jst decode junk
             // but... I got nothin
-            if nanos > 0 && nanos < Duration::MAX.as_nanos() {
-                monotonic_instant = Some(Duration::from_nanos_u128(nanos));
+            if nanos > 0 && nanos < std::time::Duration::MAX.as_nanos() {
+                monotonic_instant = Some(std::time::Duration::from_nanos_u128(nanos));
             }
         }
 
-        Ok(EchoMessageDataUnix {
+        Ok(Self {
             since_epoc,
             monotonic_instant,
         })
@@ -289,10 +298,10 @@ impl TryFrom<&bytes::Bytes> for EchoMessageDataUnix {
 }
 
 impl EchoMessage {
-    pub fn identifier(&self) -> u16 {
+    pub const fn identifier(&self) -> u16 {
         self.identifier
     }
-    pub fn sequence_number(&self) -> u16 {
+    pub const fn sequence_number(&self) -> u16 {
         self.sequence_number
     }
     pub fn parse_unix_data(&self) -> Result<EchoMessageDataUnix, std::io::Error> {
@@ -307,7 +316,7 @@ impl TryFrom<&bytes::Bytes> for EchoMessage {
     type Error = std::io::Error;
 
     fn try_from(bytes: &bytes::Bytes) -> Result<Self, Self::Error> {
-        Ok(EchoMessage {
+        Ok(Self {
             identifier: u16::from_be_bytes([bytes[4], bytes[5]]),
             sequence_number: u16::from_be_bytes([bytes[6], bytes[7]]),
             data: EchoMessageData::Bytes(bytes.slice(8..)),
@@ -334,8 +343,9 @@ pub struct ICMPMessage {
 }
 
 impl ICMPMessage {
-    pub fn new_echo_request(identifier: u16, sequence: u16) -> ICMPMessage {
-        ICMPMessage {
+    #[must_use]
+    pub fn new_echo_request(identifier: u16, sequence: u16) -> Self {
+        Self {
             checksum: [0, 0],
             message: ICMPMessageTypes::Echo(EchoMessage {
                 identifier,
@@ -346,13 +356,14 @@ impl ICMPMessage {
     }
 
     pub fn echo_reply(original: &EchoMessage) -> Self {
-        ICMPMessage {
+        Self {
             checksum: [0, 0],
             message: ICMPMessageTypes::EchoReply(original.clone()),
         }
     }
 
     pub fn from_bytes(bytes: &bytes::Bytes) -> std::io::Result<Self> {
+        #[allow(clippy::enum_glob_use)]
         use ICMPMessageTypes::*;
 
         // TODO Compute and validate checksum
@@ -390,10 +401,11 @@ impl ICMPMessage {
             )),
         }?;
 
-        Ok(ICMPMessage { checksum, message })
+        Ok(Self { checksum, message })
     }
 
     fn type_and_code_u8(&self) -> (u8, u8) {
+        #[allow(clippy::enum_glob_use)]
         use ICMPMessageTypes::*;
         match &self.message {
             EchoReply(_) => (0u8, 0u8),
@@ -409,6 +421,7 @@ impl ICMPMessage {
 
 impl common::WriteToBuffer for ICMPMessage {
     fn encoded_length(&self) -> usize {
+        #[allow(clippy::enum_glob_use)]
         use ICMPMessageTypes::*;
 
         1 // Type

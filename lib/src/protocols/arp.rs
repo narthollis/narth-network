@@ -5,9 +5,10 @@ use crate::protocols::ethernet::{EtherType, EthernetHeader};
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
+use std::ops::Add;
 use std::time::Instant;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum HardwareType {
     Ethernet,
     Other(u16),
@@ -15,24 +16,22 @@ pub enum HardwareType {
 impl From<[u8; 2]> for HardwareType {
     fn from(v: [u8; 2]) -> Self {
         match v {
-            [0x00, 0x01] => HardwareType::Ethernet,
-            _ => HardwareType::Other(u16::from_be_bytes(v)),
+            [0x00, 0x01] => Self::Ethernet,
+            _ => Self::Other(u16::from_be_bytes(v)),
         }
     }
 }
 
 impl From<HardwareType> for u16 {
     fn from(value: HardwareType) -> Self {
-        use HardwareType::*;
-
         match value {
-            Ethernet => 0x0001,
-            Other(v) => v,
+            HardwareType::Ethernet => 0x0001,
+            HardwareType::Other(v) => v,
         }
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ProtocolType {
     IPv4,
     Other(u16),
@@ -41,22 +40,21 @@ pub enum ProtocolType {
 impl From<[u8; 2]> for ProtocolType {
     fn from(v: [u8; 2]) -> Self {
         match v {
-            [0x08, 0x00] => ProtocolType::IPv4,
-            _ => ProtocolType::Other(u16::from_be_bytes(v)),
+            [0x08, 0x00] => Self::IPv4,
+            _ => Self::Other(u16::from_be_bytes(v)),
         }
     }
 }
 impl From<ProtocolType> for u16 {
     fn from(value: ProtocolType) -> Self {
-        use ProtocolType::*;
         match value {
-            IPv4 => 0x0800,
-            Other(v) => v,
+            ProtocolType::IPv4 => 0x0800,
+            ProtocolType::Other(v) => v,
         }
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum Operation {
     Request,
     Reply,
@@ -83,7 +81,7 @@ impl From<Operation> for u16 {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub struct ArpMessage {
     operation: Operation,
     sender_hardware_addr: MacAddr,
@@ -100,8 +98,9 @@ fn parse_data_error(message: &str) -> Error {
 }
 
 impl ArpMessage {
-    pub fn gratuitous(mac: MacAddr, ipv4: Ipv4Addr) -> Self {
-        ArpMessage {
+    #[must_use]
+    pub const fn gratuitous(mac: MacAddr, ipv4: Ipv4Addr) -> Self {
+        Self {
             operation: Operation::Request,
             sender_hardware_addr: mac,
             sender_protocol_addr: ipv4,
@@ -110,8 +109,9 @@ impl ArpMessage {
         }
     }
 
-    pub fn request(requester: MacAddr, target_ipv4: Ipv4Addr, sender_ipv4: Ipv4Addr) -> Self {
-        ArpMessage {
+    #[must_use]
+    pub const fn request(requester: MacAddr, target_ipv4: Ipv4Addr, sender_ipv4: Ipv4Addr) -> Self {
+        Self {
             operation: Operation::Request,
             sender_hardware_addr: requester,
             sender_protocol_addr: sender_ipv4,
@@ -231,7 +231,7 @@ impl common::WriteToBuffer for ArpMessage {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ArpState {
     /// ARP Request is pending but above timeout, send a new request and let us know
     /// this is also the initial resolve state if no existing entry is found
@@ -240,7 +240,9 @@ pub enum ArpState {
     },
     Restart,
     /// ARP Request is pending but below timeout, hold your horses
-    PendingWait,
+    PendingWait {
+        deadline: Instant,
+    },
     /// If Pending wait time exced and max retry exced
     Timeout,
     /// The entry exists and is current - enjoy
@@ -249,7 +251,7 @@ pub enum ArpState {
     ResolvedStale(MacAddr),
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ArpTableEntry {
     Pending {
         since: Instant,
@@ -326,7 +328,9 @@ impl ArpTable {
                             ArpState::PendingRetry { source: *source }
                         }
                     } else {
-                        ArpState::PendingWait
+                        ArpState::PendingWait {
+                            deadline: since.add(ARP_REQUEST_TIMEOUT),
+                        }
                     }
                 }
                 ArpTableEntry::Timeout { since } => {

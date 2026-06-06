@@ -34,6 +34,7 @@ impl<T: Ord> PartialOrd<Self> for RouteInformation<T> {
     }
 }
 
+#[derive(Debug)]
 pub struct RouteTable<T: Ord + BitAnd<Output = T>> {
     routes: Vec<RouteInformation<T>>,
     shared: Arc<RwLock<Vec<RouteInformation<T>>>>,

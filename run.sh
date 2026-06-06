@@ -5,7 +5,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:5341"
 # CONFIG
 
 BRIDGE="narth-br0"
-PHYS_INTERFACE="enp8s0f1u2u1u2"
+PHYS_INTERFACE="enp15s0f3u2u1u2" #"enp8s0f1u2u1u2"
 TAP_INTERFACE="narth0"
 
 # DO things

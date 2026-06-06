@@ -216,16 +216,20 @@ impl FragmentDetails {
             "??1?_????" => true,
         }
     }
+}
 
-    fn parse(input: [u8; 4]) -> FragmentDetails {
-        let offset = u16::from_be_bytes(input[2..4].try_into().unwrap()) & Self::OFFSET_MAX;
+impl TryFrom<&[u8]> for FragmentDetails {
+    type Error = std::array::TryFromSliceError;
 
-        FragmentDetails {
-            identification: u16::from_be_bytes(input[0..2].try_into().unwrap()),
-            do_not_fragment: Self::parse_do_not_fragment(input[2]),
-            more_fragments: Self::parse_more_fragments(input[2]),
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let offset = u16::from_be_bytes(value[2..4].try_into()?) & Self::OFFSET_MAX;
+
+        Ok(Self {
+            identification: u16::from_be_bytes(value[0..2].try_into()?),
+            do_not_fragment: Self::parse_do_not_fragment(value[2]),
+            more_fragments: Self::parse_more_fragments(value[2]),
             offset,
-        }
+        })
     }
 }
 
@@ -239,12 +243,12 @@ impl WriteToBuffer for FragmentDetails {
 
         let mut raw = 0u16;
         if self.do_not_fragment {
-            raw |= 1 << 14
+            raw |= 1 << 14;
         }
         if self.more_fragments {
-            raw |= 1 << 13
+            raw |= 1 << 13;
         }
-        raw |= self.offset & FragmentDetails::OFFSET_MAX;
+        raw |= self.offset & Self::OFFSET_MAX;
         buffer.put_u16(raw);
     }
 }
@@ -259,10 +263,10 @@ pub enum IPProtocolTypes {
 impl From<u8> for IPProtocolTypes {
     fn from(value: u8) -> Self {
         match value {
-            1 => IPProtocolTypes::ICMP,
-            6 => IPProtocolTypes::TCP,
-            17 => IPProtocolTypes::UDP,
-            _ => IPProtocolTypes::Other(value),
+            1 => Self::ICMP,
+            6 => Self::TCP,
+            17 => Self::UDP,
+            _ => Self::Other(value),
         }
     }
 }
@@ -277,6 +281,8 @@ impl From<IPProtocolTypes> for u8 {
     }
 }
 
+/// IPv4 Header
+///
 /// Columns adjusted to byte order - docs use base 10
 /// 0               1               2               3
 /// 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7 0 1 2 3 4 5 6 7
@@ -318,7 +324,7 @@ impl IPv4Header {
     ) -> Self {
         let header_len = IPv4HeaderLengthWords(5);
 
-        IPv4Header {
+        Self {
             header_len,
             type_of_service: TypeOfService {
                 high_reliability: false,
@@ -348,19 +354,24 @@ impl IPv4Header {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid IPv4 version"));
         }
 
-        // TODO Check header checksum
-
         let header_len: IPv4HeaderLengthWords = bytes[0].into();
         let header_len_bytes = header_len.byte_len() as usize;
+        if bytes.len() < header_len_bytes {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "Invalid IPv4 header length",
+            ));
+        }
+
         let options_and_padding = bytes.slice(20..header_len_bytes);
 
-        Ok(IPv4Header {
+        // TODO Check header checksum
+
+        Ok(Self {
             header_len,
             type_of_service: TypeOfService::parse(bytes[1]),
             total_length: u16::from_be_bytes(bytes[2..4].try_into().map_err(parse_eol_error)?),
-            fragment_details: FragmentDetails::parse(
-                bytes[4..8].try_into().map_err(parse_eol_error)?,
-            ),
+            fragment_details: bytes[4..8].try_into().map_err(parse_eol_error)?,
             time_to_live: bytes[8],
             protocol: bytes[9].into(),
             header_checksum: u16::from_be_bytes(bytes[10..12].try_into().map_err(parse_eol_error)?),
@@ -374,12 +385,8 @@ impl IPv4Header {
         })
     }
 
-    pub fn protocol(&self) -> IPProtocolTypes {
+    pub const fn protocol(&self) -> IPProtocolTypes {
         self.protocol
-    }
-
-    pub fn len(&self) -> usize {
-        self.header_len.byte_len() as usize
     }
 
     pub fn source_address(&self) -> Ipv4Addr {
@@ -392,7 +399,7 @@ impl IPv4Header {
 
 impl WriteToBuffer for IPv4Header {
     fn encoded_length(&self) -> usize {
-        self.len()
+        self.header_len.byte_len() as usize
     }
 
     fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
