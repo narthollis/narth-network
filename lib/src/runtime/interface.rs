@@ -617,7 +617,7 @@ impl InterfaceWorker {
             }
         };
 
-        let payload = &bytes.slice(ip.encoded_length()..);
+        let payload = &bytes.slice(ip.encoded_length()..ip.total_length());
 
         trace_span!(
             "recv ipv4",

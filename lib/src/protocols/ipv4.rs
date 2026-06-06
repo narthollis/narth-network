@@ -13,21 +13,21 @@ pub struct IPv4HeaderLengthWords(u8);
 
 impl IPv4HeaderLengthWords {
     #[bitmatch]
-    fn to_byte(self, input: u8) -> u8 {
+    const fn to_byte(self, input: u8) -> u8 {
         let a = input;
         let b = self.0;
 
         bitpack!("aaaabbbb")
     }
 
-    fn byte_len(self) -> u16 {
+    const fn byte_len(self) -> u16 {
         self.0 as u16 * 4
     }
 }
 
 impl From<u8> for IPv4HeaderLengthWords {
-    fn from(input: u8) -> IPv4HeaderLengthWords {
-        IPv4HeaderLengthWords(input & 0x0F)
+    fn from(input: u8) -> Self {
+        Self(input & 0x0F)
     }
 }
 
@@ -363,9 +363,16 @@ impl IPv4Header {
             ));
         }
 
-        let options_and_padding = bytes.slice(20..header_len_bytes);
+        let mut checksum = internet_checksum::Checksum::new();
+        checksum.add_bytes(&bytes[..10]); // Add upto the checksum
+        checksum.add_bytes(&[0, 0]); // Consider 0 for the checksum
+        checksum.add_bytes(&bytes[12..header_len_bytes]); // and then the rest of the checksum
+        let checksum = checksum.checksum();
+        if [bytes[10], bytes[11]] != checksum {
+            return Err(Error::new(ErrorKind::InvalidData, "Invalid IPv4 checksum"));
+        }
 
-        // TODO Check header checksum
+        let options_and_padding = bytes.slice(20..header_len_bytes);
 
         Ok(Self {
             header_len,
@@ -389,11 +396,19 @@ impl IPv4Header {
         self.protocol
     }
 
-    pub fn source_address(&self) -> Ipv4Addr {
+    pub const fn source_address(&self) -> Ipv4Addr {
         self.source_address
     }
-    pub fn destination_address(&self) -> Ipv4Addr {
+    pub const fn destination_address(&self) -> Ipv4Addr {
         self.destination_address
+    }
+
+    pub const fn payload_length(&self) -> usize {
+        self.total_length as usize - self.header_len.byte_len() as usize
+    }
+
+    pub const fn total_length(&self) -> usize {
+        self.total_length as usize
     }
 }
 

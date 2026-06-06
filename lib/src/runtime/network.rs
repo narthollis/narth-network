@@ -96,6 +96,9 @@ pub struct Network<T: NetworkBridge> {
 }
 
 impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
+    const RECEIVE_QUEUE_SIZE: usize = 4096;
+    const SEND_QUEUE_SIZE: usize = 4096;
+
     /// Create a new Network attached to the passed in Bridge
     ///
     /// # Arguments
@@ -175,7 +178,8 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
             ));
         }
 
-        let (recv_producer, recv_consumer) = ringbuf::HeapRb::<NetworkRecvPayload>::new(64).split();
+        let (recv_producer, recv_consumer) =
+            ringbuf::HeapRb::<NetworkRecvPayload>::new(Self::RECEIVE_QUEUE_SIZE).split();
 
         let (interface, worker) = Interface::new(
             self.bridge.mtu(),
@@ -244,8 +248,10 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
     }
 
     fn read_bridge(&mut self, pool: &mut BufferPool) -> bool {
+        // TODO Consider some kind of budget to prevent starving out the send side
         loop {
             let mut buffer = pool.pop().unwrap_or_else(|| {
+                // TODO Limit expansion
                 pool.expand(64);
                 pool.pop().expect("buffer pool is exhausted after expand")
             });
@@ -276,6 +282,7 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
     }
 
     fn read_send_receiver(&mut self) {
+        // TODO Consider some kind of budget to avoid starving out the recv side
         loop {
             match self.send_receiver.try_recv() {
                 Ok(NetworkSendPayload::Packet(bytes)) => {

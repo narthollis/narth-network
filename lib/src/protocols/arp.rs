@@ -98,6 +98,8 @@ fn parse_data_error(message: &str) -> Error {
 }
 
 impl ArpMessage {
+    const ARP_LENGTH: usize = 28;
+
     #[must_use]
     pub const fn gratuitous(mac: MacAddr, ipv4: Ipv4Addr) -> Self {
         Self {
@@ -121,6 +123,13 @@ impl ArpMessage {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() < Self::ARP_LENGTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "ARP message too short",
+            ));
+        }
+
         let hardware_type_raw: [u8; 2] = bytes[0..2].try_into().map_err(parse_eol_error)?;
         let hardware_type: HardwareType = hardware_type_raw.into();
 
@@ -157,7 +166,7 @@ impl ArpMessage {
             bytes[24..28].try_into().map_err(parse_eol_error)?;
         let target_protocol_addr = target_protocol_addr_raw.into();
 
-        Ok(ArpMessage {
+        Ok(Self {
             operation,
             sender_hardware_addr: bytes[8..14]
                 .try_into()
@@ -170,27 +179,29 @@ impl ArpMessage {
         })
     }
 
-    pub fn operation(&self) -> Operation {
+    #[must_use]
+    pub const fn operation(&self) -> Operation {
         self.operation
     }
-    pub fn target_mac(&self) -> MacAddr {
+    #[must_use]
+    pub const fn target_mac(&self) -> MacAddr {
         self.target_hardware_addr
     }
-    pub fn target_addr(&self) -> Ipv4Addr {
+    #[must_use]
+    pub const fn target_addr(&self) -> Ipv4Addr {
         self.target_protocol_addr
     }
-    pub fn source_mac(&self) -> MacAddr {
+    #[must_use]
+    pub const fn source_mac(&self) -> MacAddr {
         self.sender_hardware_addr
     }
-    pub fn source_addr(&self) -> Ipv4Addr {
+    #[must_use]
+    pub const fn source_addr(&self) -> Ipv4Addr {
         self.sender_protocol_addr
     }
 
-    pub fn len(&self) -> usize {
-        28
-    }
-
-    pub fn reply(&self, mac: MacAddr, ipv4: Ipv4Addr) -> ArpMessage {
+    #[must_use]
+    pub const fn reply(&self, mac: MacAddr, ipv4: Ipv4Addr) -> ArpMessage {
         ArpMessage {
             operation: Operation::Reply,
             sender_hardware_addr: mac,
@@ -200,7 +211,8 @@ impl ArpMessage {
         }
     }
 
-    pub fn create_ethernet(&'_ self) -> EthernetHeader {
+    #[must_use]
+    pub const fn create_ethernet(&'_ self) -> EthernetHeader {
         EthernetHeader::new(
             EtherType::ARP,
             self.sender_hardware_addr,
@@ -211,7 +223,7 @@ impl ArpMessage {
 
 impl common::WriteToBuffer for ArpMessage {
     fn encoded_length(&self) -> usize {
-        28
+        Self::ARP_LENGTH
     }
 
     fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
@@ -364,6 +376,7 @@ impl ArpTable {
         }
     }
 
+    #[must_use]
     pub fn pending(&self) -> Vec<(Ipv4Addr, Ipv4Addr)> {
         self.table
             .iter()

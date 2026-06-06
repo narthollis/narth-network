@@ -80,7 +80,7 @@ impl AsRef<[u8]> for LocalBuffer {
         &self
             .buffer
             .as_ref()
-            .expect("LocalBuffer in unexpected state during read")
+            .expect("LocalBuffer used after Drop")
             .bytes[..self.written]
     }
 }
@@ -92,7 +92,7 @@ impl std::ops::Deref for LocalBuffer {
         &self
             .buffer
             .as_ref()
-            .expect("LocalBuffer in unexpected state during read")
+            .expect("LocalBuffer user after Drop")
             .bytes[..self.written]
     }
 }
@@ -102,21 +102,19 @@ impl std::ops::DerefMut for LocalBuffer {
         &mut self
             .buffer
             .as_mut()
-            .expect("LocalBuffer in unexpected state during write")
+            .expect("LocalBuffer used after Drop")
             .bytes[self.written..]
     }
 }
 
 impl Drop for LocalBuffer {
     fn drop(&mut self) {
-        let mut entry = self
-            .buffer
-            .take()
-            .expect("LocalBuffer in unexpected state during drop");
+        let entry = self.buffer.take().expect("LocalBuffer used after Drop");
         let return_tx = entry.return_tx.clone();
 
+        // Commented to avoid memory bandwidth spamming
         // Zero out what has been written in for safety
-        entry.bytes[..self.written].fill(0);
+        //entry.bytes[..self.written].fill(0);
 
         _ = return_tx.send(entry);
     }

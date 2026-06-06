@@ -45,7 +45,7 @@ impl<T: Ord + BitAnd<Output = T> + Clone + Copy> RouteTable<T> {
         self.shared.clone()
     }
 
-    fn update_shared(&mut self) {
+    fn update_shared(&self) {
         let next = self.routes.clone();
         let mut shared = self.shared.write().expect("route table poisoned rwlock");
         *shared = next;
