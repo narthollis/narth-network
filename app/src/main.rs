@@ -4,7 +4,6 @@ use narth_net::runtime::network::Network;
 use std::io::{Write, stdout};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, RawFd};
-use std::thread;
 use std::time::Duration;
 use tun_rs::SyncDevice;
 
@@ -59,7 +58,7 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
     let interface = network.add_interface(MAC_OURS)?;
 
     // TODO make it so i can add / remove interfaces after starting...
-    let jh = thread::spawn(move || network.run());
+    let jh = std::thread::spawn(move || network.run());
 
     if std::env::args().any(|a| a == "--wait") {
         std::thread::sleep(Duration::from_secs(10));
@@ -89,15 +88,14 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "IPv4 Addresses: {:?}",
         interface
-            .ipv4_addresses()
-            .unwrap()
+            .ipv4_addresses()?
             .iter()
             .map(|ip| ip.to_string())
             .collect::<Vec<_>>()
             .join(", ")
     );
     println!("IPv4 Routes:");
-    for route in interface.ipv4_routes().unwrap() {
+    for route in interface.ipv4_routes()? {
         match route.next_hop {
             Some(next_hop) => println!(
                 "  {}/{} via {} from {}",

@@ -1,6 +1,6 @@
 use bytes::{BufMut, Bytes};
 
-pub(crate) trait WriteToBuffer {
+pub trait WriteToBuffer {
     fn encoded_length(&self) -> usize;
     fn write_to_buffer<B: BufMut>(&self, buffer: &mut B);
 }

@@ -1,8 +1,6 @@
 use crate::protocols::ipv4::icmp::{DestinationUnreachableCode, EchoMessage, ICMPMessage};
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
 use crate::runtime::interface::{AsyncSendError, SendError};
-use std::net::Ipv4Addr;
-use std::time::Instant;
 use tracing::error;
 /* region Public */
 #[derive(Debug, Clone, Copy)]
@@ -119,15 +117,6 @@ struct PingManagerEntry {
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 struct PingEntryKey(std::net::Ipv4Addr, u16);
 
-enum PingManagerEntryTimerResult {
-    Deadline(std::time::Instant),
-    Message {
-        deadline: std::time::Instant,
-        target: std::net::Ipv4Addr,
-        message: ICMPMessage,
-    },
-}
-
 #[derive(Debug)]
 pub struct PingManager {
     sessions: std::collections::HashMap<PingEntryKey, PingManagerEntry>,
@@ -194,49 +183,23 @@ impl PingManager {
         }
 
         let now = std::time::Instant::now();
-        let mut earliest_deadline: Option<std::time::Instant> = None;
 
-        let request: Vec<_> = self
+        let deadline = self
             .sessions
             .iter_mut()
-            .filter_map(
-                |(_, entry)| match Self::process_timers_session(entry, now) {
-                    None => None,
-                    Some(PingManagerEntryTimerResult::Message {
-                        deadline,
-                        target,
-                        message,
-                    }) => {
-                        earliest_deadline = earliest_deadline
-                            .map(|dl| dl.min(deadline))
-                            .or(Some(deadline));
-
-                        Some((target, message))
-                    }
-                    Some(PingManagerEntryTimerResult::Deadline(deadline)) => {
-                        earliest_deadline = earliest_deadline
-                            .map(|dl| dl.min(deadline))
-                            .or(Some(deadline));
-                        None
-                    }
-                },
-            )
-            .collect();
+            .filter_map(|(_, entry)| Self::process_timers_session(entry, now, sender))
+            .min();
 
         self.garbage_collect();
 
-        // TODO this sending needs to be moved into the session processing
-        for (a, m) in request {
-            sender.send_ipv4(a, Ipv4Addr::UNSPECIFIED, IPProtocolTypes::ICMP, &m);
-        }
-
-        earliest_deadline
+        deadline
     }
 
     fn process_timers_session(
         entry: &mut PingManagerEntry,
         now: std::time::Instant,
-    ) -> Option<PingManagerEntryTimerResult> {
+        sender: &mut super::interface::SenderContext,
+    ) -> Option<std::time::Instant> {
         // Process Timeouts
         while let Some((_, sent_at)) = entry.pending.front() {
             if (now - *sent_at) > entry.timeout {
@@ -265,20 +228,25 @@ impl PingManager {
                 #[allow(clippy::cast_possible_truncation)]
                 let sequence = entry.sent_count as u16;
 
-                entry.pending.push_back((sequence, now));
-                entry.last_sent = Some(now);
-                entry.sent_count = entry.sent_count.wrapping_add(1);
-
-                tracing::trace!("created new ping request to {}", entry.target);
-                Some(PingManagerEntryTimerResult::Message {
-                    deadline: now + entry.timeout,
-                    target: entry.target,
-                    message: ICMPMessage::new_echo_request(entry.identifier, sequence),
-                })
+                if sender
+                    .send_ipv4(
+                        entry.target,
+                        std::net::Ipv4Addr::UNSPECIFIED,
+                        IPProtocolTypes::ICMP,
+                        &ICMPMessage::new_echo_request(entry.identifier, sequence),
+                    )
+                    .is_ok()
+                {
+                    entry.pending.push_back((sequence, now));
+                    entry.last_sent = Some(now);
+                    entry.sent_count = entry.sent_count.wrapping_add(1);
+                    Some(now + entry.timeout)
+                } else {
+                    // We failed to send when we needed to
+                    Some(now)
+                }
             } else {
-                Some(PingManagerEntryTimerResult::Deadline(
-                    entry.last_sent.expect("unreachable") + entry.interval,
-                ))
+                Some(entry.last_sent.expect("unreachable") + entry.interval)
             }
         } else {
             None
@@ -300,9 +268,11 @@ impl PingManager {
             let duration = message.parse_unix_data().ok().and_then(|data| {
                 data.monotonic_instant.and_then(|m| {
                     {
-                        crate::runtime::BOOT_TIME
-                            .get()
-                            .and_then(|boot| Instant::now().duration_since(*boot).checked_sub(m))
+                        crate::runtime::BOOT_TIME.get().and_then(|boot| {
+                            std::time::Instant::now()
+                                .duration_since(*boot)
+                                .checked_sub(m)
+                        })
                     }
                     .or_else(|| {
                         println!("from system");
@@ -436,7 +406,7 @@ mod tests {
         assert_eq!(PingManager::unwrap_sequence(65520, 65530), 65520);
 
         // High epoch: Sent is 131080 (2 * 65536 + 8), sequence is 2
-        assert_eq!(PingManager::unwrap_sequence(2, 131080), 131074);
+        assert_eq!(PingManager::unwrap_sequence(2, 131_080), 131_074);
     }
 
     #[test]
@@ -446,7 +416,7 @@ mod tests {
         assert_eq!(PingManager::unwrap_sequence(65530, 65520), 65530);
 
         // High epoch: Sent is 131074, sequence is 8
-        assert_eq!(PingManager::unwrap_sequence(8, 131074), 131080);
+        assert_eq!(PingManager::unwrap_sequence(8, 131_074), 131_080);
     }
 
     #[test]

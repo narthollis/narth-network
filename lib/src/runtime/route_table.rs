@@ -64,14 +64,14 @@ impl<T: Ord + BitAnd<Output = T> + Clone + Copy> RouteTable<T> {
             Ok(index) => self.routes[index] = new,
             // Err it didn't but instead tells us where it should be
             Err(index) => self.routes.insert(index, new),
-        };
+        }
 
-        self.update_shared()
+        self.update_shared();
     }
 
     pub fn remove_matching(&mut self, predicate: impl Fn(&&RouteInformation<T>) -> bool) {
         self.routes.retain(|route| !predicate(&route));
-        self.update_shared()
+        self.update_shared();
     }
 
     pub fn lookup(&self, target: T) -> Option<&RouteInformation<T>> {
@@ -81,7 +81,7 @@ impl<T: Ord + BitAnd<Output = T> + Clone + Copy> RouteTable<T> {
 
 impl Default for RouteTable<Ipv4Addr> {
     fn default() -> Self {
-        RouteTable {
+        Self {
             routes: Vec::default(),
             shared: Arc::default(),
         }
@@ -90,7 +90,7 @@ impl Default for RouteTable<Ipv4Addr> {
 
 impl Default for RouteTable<Ipv6Addr> {
     fn default() -> Self {
-        RouteTable {
+        Self {
             routes: Vec::default(),
             shared: Arc::default(),
         }

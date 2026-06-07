@@ -6,19 +6,24 @@ pub struct MacAddr(u8, u8, u8, u8, u8, u8);
 pub const BROADCAST: MacAddr = MacAddr(255, 255, 255, 255, 255, 255);
 
 impl MacAddr {
+    #[must_use]
+    #[allow(clippy::many_single_char_names)]
     pub const fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {
-        MacAddr(a, b, c, d, e, f)
+        Self(a, b, c, d, e, f)
     }
 
-    pub fn from_octets(bytes: [u8; 6]) -> Self {
-        MacAddr(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])
+    #[must_use]
+    pub const fn from_octets(bytes: [u8; 6]) -> Self {
+        Self(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])
     }
 
+    #[must_use]
     pub fn is_broadcast(&self) -> bool {
         self.eq(&BROADCAST)
     }
 
-    pub fn octets(&self) -> [u8; 6] {
+    #[must_use]
+    pub const fn octets(&self) -> [u8; 6] {
         [self.0, self.1, self.2, self.3, self.4, self.5]
     }
 }
@@ -45,8 +50,8 @@ impl std::fmt::Display for MacAddr {
 }
 
 impl From<[u8; 6]> for MacAddr {
-    fn from(bytes: [u8; 6]) -> MacAddr {
-        MacAddr(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])
+    fn from(bytes: [u8; 6]) -> Self {
+        Self(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5])
     }
 }
 
@@ -63,11 +68,11 @@ impl std::error::Error for TryFromSliceError {}
 
 impl TryFrom<&[u8]> for MacAddr {
     type Error = TryFromSliceError;
-    fn try_from(bytes: &[u8]) -> Result<MacAddr, Self::Error> {
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
         if bytes.len() != 6 {
             return Err(TryFromSliceError(()));
         }
-        Ok(MacAddr(
+        Ok(Self(
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
         ))
     }

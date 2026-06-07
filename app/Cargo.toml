@@ -11,10 +11,6 @@ narth_net = { package = "narth-net", path = "../lib" }
 
 tun-rs = { version = "2.8.3", default-features = false, features = [] }
 
-# This is all here for getting trace into seq
-# Async runtime for the exporter worker loop
-tokio = { version = "1", features = ["full"] }
-
 # Tracing ecosystem
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
