@@ -8,7 +8,7 @@ pub mod interface;
 pub mod network;
 mod route_table;
 
-pub use interface::{PingResultStatus, PingSession};
+pub use interface::{PingResultStatus, PingSession, UdpSocket};
 
 pub(crate) static BOOT_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 

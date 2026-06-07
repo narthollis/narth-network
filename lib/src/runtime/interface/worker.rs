@@ -79,6 +79,8 @@ impl InterfaceWorker {
                 }
             }
 
+            self.managers.udp_manager.handle_send(&mut self.context);
+
             let deadline = self.perform_timers();
 
             std::thread::park_timeout(
@@ -115,6 +117,9 @@ impl InterfaceWorker {
                 } => _ = reply.send(Ok(self.managers.ping_manager.ping(target, count, interval))),
                 InterfaceControlMessage::Stop() => {
                     return false;
+                }
+                InterfaceControlMessage::BindUdp(addr, reply) => {
+                    _ = reply.send(self.managers.udp_manager.bind(addr));
                 }
             }
         }

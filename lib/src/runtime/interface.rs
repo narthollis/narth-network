@@ -11,7 +11,9 @@ pub(crate) use crate::runtime::interface::context::InterfaceContext;
 pub(crate) use crate::runtime::interface::worker::InterfaceWorker;
 use crate::runtime::route_table::RouteInformation;
 pub use l4_managers::ping::{PingResultStatus, PingSession};
-use std::net::{Ipv4Addr, Ipv6Addr};
+pub use l4_managers::udp::UdpSocket;
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::{Arc, RwLock, mpsc, oneshot};
 use tracing::error;
 
@@ -71,6 +73,7 @@ impl From<mpsc::SendError<InterfaceControlMessage>> for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 type ResultSender<T> = oneshot::Sender<Result<T>>;
+type IoResultSender<T> = oneshot::Sender<std::io::Result<T>>;
 
 pub(crate) enum InterfaceControlMessage {
     IPv4AddressAdd(Ipv4Addr, u8, ResultSender<()>),
@@ -90,6 +93,7 @@ pub(crate) enum InterfaceControlMessage {
         reply: ResultSender<PingSession>,
     },
     Stop(),
+    BindUdp(std::net::SocketAddr, IoResultSender<UdpSocket>),
 }
 
 #[derive(Debug)]
@@ -205,5 +209,33 @@ impl Interface {
 
     pub fn ipv6_addresses(&self) -> Result<Vec<Ipv6Addr>> {
         Ok(vec![])
+    }
+
+    pub fn bind_udp<A: ToSocketAddrs>(&self, addr: A) -> std::io::Result<UdpSocket> {
+        let mut last_error = None;
+
+        for addr in addr.to_socket_addrs()? {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            match self
+                .control_tx
+                .send(InterfaceControlMessage::BindUdp(addr, reply_tx))
+            {
+                Ok(()) => match reply_rx.recv() {
+                    Ok(Ok(s)) => return Ok(s),
+                    Ok(Err(err)) => last_error = Some(err),
+                    Err(err) => last_error = Some(std::io::Error::other(err)),
+                },
+                Err(err) => last_error = Some(std::io::Error::other(err)),
+            }
+        }
+        last_error.map_or_else(
+            || {
+                Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "could not resolve any addresses",
+                ))
+            },
+            Err,
+        )
     }
 }

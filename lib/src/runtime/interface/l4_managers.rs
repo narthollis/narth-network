@@ -1,13 +1,16 @@
 use crate::protocols::ipv4::IPProtocolTypes;
+use crate::runtime::interface::l4_managers::udp::UdpManager;
 use crate::runtime::interface::{AsyncSendError, InterfaceContext};
 use ping::PingManager;
 use tracing::{error, warn};
 
 pub mod ping;
+pub mod udp;
 
 #[derive(Debug, Default)]
 pub struct Managers {
     pub(super) ping_manager: PingManager,
+    pub(super) udp_manager: UdpManager,
 }
 
 impl Managers {

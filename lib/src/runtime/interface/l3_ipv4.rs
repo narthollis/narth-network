@@ -34,10 +34,11 @@ impl IPv4Handler {
 
         match ip.protocol() {
             IPProtocolTypes::ICMP => Self::recv_icmp(ctx, managers, ip, payload),
-            IPProtocolTypes::UDP => {
-                // todo udp
-                // self.udp_manager.recv_ipv4(ip.source(), ip.destination(), payload);
-            }
+            IPProtocolTypes::UDP => managers.udp_manager.recv(
+                ip.source_address().into(),
+                ip.destination_address().into(),
+                payload,
+            ),
             IPProtocolTypes::TCP => {
                 // todo tcp
             }
