@@ -15,6 +15,16 @@ impl WriteToBuffer for Bytes {
     }
 }
 
+impl<T: ?Sized + WriteToBuffer> WriteToBuffer for &T {
+    fn encoded_length(&self) -> usize {
+        (*self).encoded_length()
+    }
+
+    fn write_to_buffer<B: BufMut>(&self, buffer: &mut B) {
+        (*self).write_to_buffer(buffer);
+    }
+}
+
 impl<A, B> WriteToBuffer for (A, B)
 where
     A: WriteToBuffer,

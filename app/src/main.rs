@@ -4,7 +4,6 @@ use narth_net::runtime::network::Network;
 use std::io::{Write, stdout};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, RawFd};
-use std::pin::pin;
 use std::thread;
 use std::time::Duration;
 use tun_rs::SyncDevice;
@@ -38,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn s_main() -> std::io::Result<()> {
+fn s_main() -> Result<(), Box<dyn std::error::Error>> {
     // tracing_subscriber::registry()
     //     .with(fmt::layer().pretty())
     //     .with(tracing_subscriber::EnvFilter::from_default_env())
@@ -72,7 +71,7 @@ fn s_main() -> std::io::Result<()> {
         Ok(_) => println!(" Added"),
         Err(e) => {
             eprintln!("Error: {}", e);
-            return Err(std::io::Error::other(e));
+            return Err(std::io::Error::other(e).into());
         }
     }
 
@@ -127,6 +126,14 @@ fn s_main() -> std::io::Result<()> {
     println!();
     println!("Pining router");
     ping(&interface, [192, 168, 174, 1].into(), 4);
+
+    // Unreachable
+    println!();
+    println!("Pining net unreachable");
+    ping(&interface, [192, 0, 2, 1].into(), 4);
+    println!();
+    println!("Pining host unreachable");
+    ping(&interface, [198, 51, 100, 1].into(), 4);
 
     println!();
     println!("Ping the internet!");

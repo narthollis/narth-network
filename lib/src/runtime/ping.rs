@@ -1,5 +1,7 @@
-use crate::protocols::ipv4::IPv4Header;
-use crate::protocols::ipv4::icmp::{DestinationUnreachableMessage, EchoMessage, ICMPMessage};
+use crate::protocols::ipv4::icmp::{DestinationUnreachableCode, EchoMessage, ICMPMessage};
+use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
+use crate::runtime::interface::{AsyncSendError, SendError};
+use std::net::Ipv4Addr;
 use std::time::Instant;
 use tracing::error;
 /* region Public */
@@ -158,7 +160,7 @@ impl PingManager {
             identifier,
             count,
             interval,
-            timeout: std::time::Duration::from_secs(1),
+            timeout: std::time::Duration::from_secs(10),
 
             sent_count: 0,
             last_sent: None,
@@ -181,10 +183,8 @@ impl PingManager {
 
     pub(crate) fn perform_timers(
         &mut self,
-    ) -> (
-        Option<std::time::Instant>,
-        Vec<(std::net::Ipv4Addr, ICMPMessage)>,
-    ) {
+        sender: &mut super::interface::SenderContext,
+    ) -> Option<std::time::Instant> {
         while let Ok(control_message) = self.control_rx.try_recv() {
             match control_message {
                 ControlMessage::Stop(key) => {
@@ -196,7 +196,7 @@ impl PingManager {
         let now = std::time::Instant::now();
         let mut earliest_deadline: Option<std::time::Instant> = None;
 
-        let request = self
+        let request: Vec<_> = self
             .sessions
             .iter_mut()
             .filter_map(
@@ -225,7 +225,12 @@ impl PingManager {
 
         self.garbage_collect();
 
-        (earliest_deadline, request)
+        // TODO this sending needs to be moved into the session processing
+        for (a, m) in request {
+            sender.send_ipv4(a, Ipv4Addr::UNSPECIFIED, IPProtocolTypes::ICMP, &m);
+        }
+
+        earliest_deadline
     }
 
     fn process_timers_session(
@@ -318,8 +323,53 @@ impl PingManager {
         self.garbage_collect();
     }
 
-    pub(crate) fn on_unreachable(&mut self, message: &DestinationUnreachableMessage) {
-        eprintln!("DestinationUnreachable={:?}", message);
+    pub(crate) fn on_async_send_error(&mut self, message: AsyncSendError) {
+        let (header, datagram) = match &message {
+            AsyncSendError::LocalSendError {
+                ipv4header,
+                datagram,
+                ..
+            } => (ipv4header, datagram),
+            AsyncSendError::ICMPUnreachable(m) => (&m.ipv4header, &m.datagram),
+        };
+
+        let kind = datagram[0];
+        let code = datagram[1];
+        // let checksum = [message.datagram[2], message.datagram[3]];
+        if kind != 8 || code != 0 {
+            return;
+        }
+
+        let identifier = u16::from_be_bytes([datagram[4], datagram[5]]);
+        let sequence_number = u16::from_be_bytes([datagram[6], datagram[7]]);
+
+        if let Some(session) = self
+            .sessions
+            .get_mut(&PingEntryKey(header.destination_address(), identifier))
+        {
+            if let Some(pending) = session.pending.iter().position(|e| e.0 == sequence_number) {
+                session.pending.remove(pending);
+            }
+            _ = session.recv_tx.send((
+                Self::unwrap_sequence(sequence_number, session.sent_count),
+                PingResultStatus::Unreachable(match message {
+                    AsyncSendError::LocalSendError { error, .. } => match error {
+                        SendError::ArpTimeout => "ARP Timeout",
+                        _ => "Send Error",
+                    },
+                    AsyncSendError::ICMPUnreachable(unreachable) => match unreachable.code {
+                        DestinationUnreachableCode::NetUnreachable => "network unreachable",
+                        DestinationUnreachableCode::HostUnreachable => "host unreachable",
+                        DestinationUnreachableCode::ProtocolUnreachable => "protocol unreachable",
+                        DestinationUnreachableCode::PortUnreachable => "port unreachable",
+                        DestinationUnreachableCode::FragmentationNeededAndDoNotFragmentSet => {
+                            "fragment need and do not fragment set"
+                        }
+                        DestinationUnreachableCode::SourceRouteFailed => "source route failed",
+                    },
+                }),
+            ));
+        }
     }
 
     pub fn garbage_collect(&mut self) {

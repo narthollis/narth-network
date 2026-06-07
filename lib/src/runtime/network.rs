@@ -4,10 +4,11 @@ use crate::runtime::NetworkBridge;
 use crate::runtime::buffer_pool::BufferPool;
 use crate::runtime::common::{
     BRIDGE_WAKE_TOKEN, NETWORK_WAKE_TOKEN, NetworkRecvPayload, NetworkSendPayload, NetworkSender,
+    RingBufConsumer,
 };
 use crate::runtime::interface::{Interface, InterfaceWorker};
-use ringbuf::traits::Split;
 use std::fmt::{Debug, Formatter};
+use std::sync::atomic::Ordering;
 use tracing::{error, info, info_span, trace, warn};
 
 #[derive(thiserror::Error, Debug)]
@@ -22,6 +23,12 @@ pub enum Error {
     InterfaceHandleIncorrectSendState,
     #[error("Interface send failed due to channel capacity")]
     InterfaceSendFailed { payload: NetworkRecvPayload },
+
+    #[error("No Space for New Interface")]
+    NoInterfaceSpace,
+
+    #[error("Supplied MAC Address is already in use")]
+    MacAddressConflict,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -81,6 +88,129 @@ impl InterfaceHandle {
     }
 }
 
+struct InterfaceSendReceivers {
+    ready_bits: std::sync::Arc<[std::sync::atomic::AtomicU64; 4]>,
+    senders: [Option<RingBufConsumer<NetworkSendPayload>>; 256],
+}
+
+impl InterfaceSendReceivers {
+    fn insert(&mut self, sender: RingBufConsumer<NetworkSendPayload>) -> Result<u8> {
+        if let Some(index) = self.senders.iter().position(Option::is_none) {
+            self.senders[index] = Some(sender);
+
+            #[allow(clippy::cast_possible_truncation)] // We know that max index value us u8
+            Ok(index as u8)
+        } else {
+            Err(Error::NoInterfaceSpace)
+        }
+    }
+
+    fn ready(&mut self) -> ReadySendReceivers<'_> {
+        let ready_bits = [
+            self.ready_bits[0].swap(0, Ordering::Acquire),
+            self.ready_bits[1].swap(0, Ordering::Acquire),
+            self.ready_bits[2].swap(0, Ordering::Acquire),
+            self.ready_bits[3].swap(0, Ordering::Acquire),
+        ];
+
+        ReadySendReceivers {
+            ready_bits,
+            senders: &mut self.senders,
+            current_chunk: 0,
+            // current_bit_idx: 0,
+        }
+    }
+}
+
+struct ReadySendReceivers<'a> {
+    senders: &'a mut [Option<RingBufConsumer<NetworkSendPayload>>],
+    ready_bits: [u64; 4],
+
+    current_chunk: usize,
+}
+impl ReadySendReceivers<'_> {
+    const SENDERS_FULL_LENGTH: usize = const { u64::BITS as usize * 4 };
+}
+
+impl<'a> Iterator for ReadySendReceivers<'a> {
+    type Item = &'a mut RingBufConsumer<NetworkSendPayload>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current_chunk >= self.ready_bits.len() {
+                return None;
+            }
+            if self.ready_bits[self.current_chunk] == 0 {
+                self.current_chunk += 1;
+                continue;
+            }
+
+            // Count the number of trailing zeros to get the index of the next ready index
+            // This lets us skip strait to that ready index
+            let next_ready = self.ready_bits[self.current_chunk].trailing_zeros() as usize;
+
+            // We just need to reset that bit to zero now we are handling it
+            self.ready_bits[self.current_chunk] &= !(1 << next_ready);
+
+            // Convert the local bit index into an absolute index for our Senders array
+            let current = next_ready + (u64::BITS as usize * self.current_chunk);
+            // Then remove the consumed count
+            let current = current - (Self::SENDERS_FULL_LENGTH - self.senders.len());
+
+            // Somehow we were informed that a non-existent sender is ready
+            if self.senders[current].is_none() {
+                continue;
+            }
+
+            // Grab a local copy of senders so we can split it up and get access to just the part containing the sender
+            let local_copy = std::mem::take(&mut self.senders);
+
+            // Split the slice down to be just the item we care about, and everything after that
+            // We need to adjust out bit index by the number of items we ahve already consumed
+            let (_, rest) = local_copy.split_at_mut(current);
+            let (sender, rest) = rest.split_at_mut(1);
+
+            // Return the remaining items to senders
+            self.senders = rest;
+
+            // Extract our sender from the single item &[_] created by the split_at_mut(1)
+            if let Some(sender) = &mut sender[0] {
+                return Some(sender);
+            }
+        }
+    }
+}
+
+impl Default for InterfaceSendReceivers {
+    fn default() -> Self {
+        Self {
+            ready_bits: std::sync::Arc::default(),
+            senders: [const { None }; 256],
+        }
+    }
+}
+
+impl Debug for InterfaceSendReceivers {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let senders = self
+            .senders
+            .iter()
+            .map(|x| {
+                if x.is_some() {
+                    Some(&"RingBufConsumer<NetworkSendPayload>")
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        f.debug_struct("InterfaceSendReceivers")
+            .field("ready_bits", &self.ready_bits)
+            .field("senders", &senders)
+            .finish()
+    }
+}
+
 // TODO separate Network into Network / NetworkWorker
 #[derive(Debug)]
 pub struct Network<T: NetworkBridge> {
@@ -89,14 +219,14 @@ pub struct Network<T: NetworkBridge> {
 
     poll: mio::Poll,
 
-    send_sender: NetworkSender,
-    send_receiver: std::sync::mpsc::Receiver<NetworkSendPayload>,
+    senders: InterfaceSendReceivers,
 
     started: bool,
+    waker: std::sync::Arc<mio::Waker>,
 }
 
 impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
-    const RECEIVE_QUEUE_SIZE: usize = 4096;
+    const RECV_QUEUE_SIZE: usize = 4096;
     const SEND_QUEUE_SIZE: usize = 4096;
 
     /// Create a new Network attached to the passed in Bridge
@@ -112,7 +242,6 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
     /// Panics when mio can not construct a watcher for the provided bridge
     pub fn new(bridge: T) -> Self {
         info!("Creating network");
-        let (send_sender, send_recv) = std::sync::mpsc::channel();
 
         super::BOOT_TIME.get_or_init(std::time::Instant::now);
 
@@ -134,9 +263,8 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
             interfaces: std::collections::HashMap::default(),
 
             poll,
-            send_sender: NetworkSender::new(waker, send_sender),
-
-            send_receiver: send_recv,
+            senders: InterfaceSendReceivers::default(),
+            waker,
 
             started: true, // TODO Consider if we drop this or can actually make it work (see control before start)
         }
@@ -167,24 +295,29 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
     //         .collect())
     // }
 
-    pub fn add_interface(
-        &mut self,
-        mac_addr: MacAddr,
-    ) -> std::io::Result<std::sync::Arc<Interface>> {
+    pub fn add_interface(&mut self, mac_addr: MacAddr) -> Result<std::sync::Arc<Interface>> {
+        use ringbuf::traits::Split;
+
         if self.mac_addresses().contains(&mac_addr) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Mac address in use by host",
-            ));
+            return Err(Error::MacAddressConflict);
         }
 
         let (recv_producer, recv_consumer) =
-            ringbuf::HeapRb::<NetworkRecvPayload>::new(Self::RECEIVE_QUEUE_SIZE).split();
+            ringbuf::HeapRb::<NetworkRecvPayload>::new(Self::RECV_QUEUE_SIZE).split();
+        let (send_producer, send_consumer) =
+            ringbuf::HeapRb::<NetworkSendPayload>::new(Self::SEND_QUEUE_SIZE).split();
+
+        let id = self.senders.insert(send_consumer)?;
 
         let (interface, worker) = Interface::new(
             self.bridge.mtu(),
             mac_addr,
-            self.send_sender.clone(),
+            NetworkSender::new(
+                self.waker.clone(),
+                send_producer,
+                self.senders.ready_bits.clone(),
+                id,
+            ),
             recv_consumer,
         );
         let interface = std::sync::Arc::new(interface);
@@ -282,18 +415,24 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
     }
 
     fn read_send_receiver(&mut self) {
+        use ringbuf::traits::Consumer;
+
         // TODO Consider some kind of budget to avoid starving out the recv side
-        loop {
-            match self.send_receiver.try_recv() {
-                Ok(NetworkSendPayload::Packet(bytes)) => {
-                    if let Err(err) = self.bridge.send(&bytes) {
-                        eprintln!("failed to send packet: {err:?}");
+        for sender in self.senders.ready() {
+            loop {
+                match sender.try_pop() {
+                    Some(NetworkSendPayload::Packet(packet)) => {
+                        if let Err(err) = self.bridge.send(&packet) {
+                            eprintln!("failed to send packet: {err:?}");
+                        }
                     }
+                    Some(NetworkSendPayload::Closed(mac)) => {
+                        _ = self.interfaces.remove(&mac);
+                        // TODO: also cleanup sender
+                    }
+                    None => break,
                 }
-                Ok(NetworkSendPayload::Closed(mac)) => _ = self.interfaces.remove(&mac),
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
-            };
+            }
         }
     }
 

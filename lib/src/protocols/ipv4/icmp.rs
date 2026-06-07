@@ -1,5 +1,5 @@
 use crate::common;
-use crate::common::WriteToBuffer;
+use crate::common::{WriteToBuffer, err_as_eof};
 use crate::protocols::ipv4::IPv4Header;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
@@ -51,11 +51,11 @@ impl From<DestinationUnreachableCode> for u8 {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct DestinationUnreachableMessage {
     pub code: DestinationUnreachableCode,
     pub ipv4header: IPv4Header,
-    pub datagram: bytes::Bytes,
+    pub datagram: [u8; ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH],
 }
 
 impl TryFrom<(u8, bytes::Bytes)> for DestinationUnreachableMessage {
@@ -81,12 +81,13 @@ impl TryFrom<(u8, bytes::Bytes)> for DestinationUnreachableMessage {
             ));
         }
 
-        let datagram_start =
-            bytes.slice(header_len..header_len + ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH);
+        let datagram = bytes[header_len..header_len + ICMP_PAYLOAD_DATAGRAM_PORTION_LENGTH]
+            .try_into()
+            .map_err(err_as_eof("ICMP Payload truncated datagrams"))?;
 
         Ok(DestinationUnreachableMessage {
             ipv4header,
-            datagram: datagram_start,
+            datagram,
             code: code.try_into()?,
         })
     }
@@ -366,7 +367,24 @@ impl ICMPMessage {
         #[allow(clippy::enum_glob_use)]
         use ICMPMessageTypes::*;
 
-        // TODO Compute and validate checksum
+        if bytes.len() < 8 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "ICMP Payload truncated parsing",
+            ));
+        }
+
+        let mut checksum = internet_checksum::Checksum::new();
+        checksum.add_bytes(&bytes[..2]);
+        checksum.add_bytes(&[0u8, 0u8]);
+        checksum.add_bytes(&bytes[4..]);
+        let checksum = checksum.checksum();
+        if [bytes[2], bytes[3]] != checksum {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ICMP Payload checksum mismatch",
+            ));
+        }
 
         let checksum: [u8; 2] = [bytes[2], bytes[3]];
 

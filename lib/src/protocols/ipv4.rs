@@ -299,7 +299,7 @@ impl From<IPProtocolTypes> for u8 {
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |                    Options                    |    Padding    |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-#[derive(Eq, PartialEq, Clone)]
+#[derive(Eq, PartialEq, Clone, Copy)]
 pub struct IPv4Header {
     // const Version = 4
     header_len: IPv4HeaderLengthWords,
@@ -312,10 +312,14 @@ pub struct IPv4Header {
     header_checksum: u16,
     source_address: Ipv4Addr,
     destination_address: Ipv4Addr,
-    options_and_padding: bytes::Bytes,
+    // Restore this as parsed/strucuted when we get to IGMP for mDNS
+    // options_and_padding: bytes::Bytes,
 }
 
 impl IPv4Header {
+    pub const MIN_LENGTH: usize = 20;
+
+    #[must_use]
     pub fn new(
         protocol: IPProtocolTypes,
         source_address: Ipv4Addr,
@@ -344,7 +348,6 @@ impl IPv4Header {
             header_checksum: 0, // Will compute on write
             source_address,
             destination_address,
-            options_and_padding: bytes::Bytes::new(),
         }
     }
 
@@ -372,8 +375,6 @@ impl IPv4Header {
             return Err(Error::new(ErrorKind::InvalidData, "Invalid IPv4 checksum"));
         }
 
-        let options_and_padding = bytes.slice(20..header_len_bytes);
-
         Ok(Self {
             header_len,
             type_of_service: TypeOfService::parse(bytes[1]),
@@ -388,12 +389,15 @@ impl IPv4Header {
             destination_address: Ipv4Addr::from_octets(
                 bytes[16..20].try_into().map_err(parse_eol_error)?,
             ),
-            options_and_padding,
         })
     }
 
     pub const fn protocol(&self) -> IPProtocolTypes {
         self.protocol
+    }
+
+    pub const fn is_fragmented(&self) -> bool {
+        self.fragment_details.more_fragments || self.fragment_details.offset > 0
     }
 
     pub const fn source_address(&self) -> Ipv4Addr {
@@ -459,7 +463,7 @@ impl Debug for IPv4Header {
             .field("header_checksum", &self.header_checksum)
             .field("source_address", &self.source_address)
             .field("destination_address", &self.destination_address)
-            .field("options_and_padding", &self.options_and_padding)
+            .field("options_and_padding", &vec![0u8; 0])
             .finish()
     }
 }
