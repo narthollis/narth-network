@@ -1,12 +1,16 @@
-mod interface_worker;
-mod sender_context;
+mod context;
+mod l2_ethernet;
+mod l3_ipv4;
+mod l4_managers;
+mod worker;
 
 use crate::protocols::ethernet::mac::MacAddr;
 use crate::protocols::ipv4::icmp::DestinationUnreachableMessage;
 use crate::protocols::ipv4::{IPv4Header, prefix_to_mask};
-pub(crate) use crate::runtime::interface::interface_worker::InterfaceWorker;
-pub(crate) use crate::runtime::interface::sender_context::SenderContext;
+pub(crate) use crate::runtime::interface::context::InterfaceContext;
+pub(crate) use crate::runtime::interface::worker::InterfaceWorker;
 use crate::runtime::route_table::RouteInformation;
+pub use l4_managers::ping::{PingResultStatus, PingSession};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::{Arc, RwLock, mpsc, oneshot};
 use tracing::error;
@@ -83,7 +87,7 @@ pub(crate) enum InterfaceControlMessage {
         target: Ipv4Addr,
         count: Option<usize>,
         interval: std::time::Duration,
-        reply: ResultSender<super::ping::PingSession>,
+        reply: ResultSender<PingSession>,
     },
     Stop(),
 }
@@ -99,16 +103,16 @@ impl Interface {
     pub(super) fn new(
         mtu: usize,
         mac_address: MacAddr,
-        network_tx: super::common::NetworkSender,
-        network_rx: super::common::RingBufConsumer<super::common::NetworkRecvPayload>,
+        network_tx: super::channel::NetworkSender,
+        network_rx: super::channel::RingBufConsumer<super::channel::NetworkRecvPayload>,
     ) -> (Self, InterfaceWorker) {
         let (control_tx, control_rx) = mpsc::sync_channel(10);
 
         let worker = InterfaceWorker::new(control_rx, network_tx, network_rx, mtu, mac_address);
         let interface = Self {
             control_tx,
-            ipv4_addresses: worker.ipv4_addresses.shared(),
-            ipv4_routes: worker.sender_context.ipv4_route_table.shared(),
+            ipv4_addresses: worker.context.ipv4_addresses.shared(),
+            ipv4_routes: worker.context.ipv4_route_table.shared(),
         };
 
         (interface, worker)
@@ -125,7 +129,7 @@ impl Interface {
         target: Ipv4Addr,
         count: Option<usize>,
         interval: Option<std::time::Duration>,
-    ) -> Result<super::ping::PingSession> {
+    ) -> Result<PingSession> {
         let (tx, rx) = oneshot::channel();
 
         self.control_tx

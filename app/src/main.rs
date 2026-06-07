@@ -46,7 +46,7 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(tun_rs::Layer::L2)
         .mac_addr(MAC_HOST.octets())
         .mtu(MTU)
-        //.ipv4(IPV4_HOST, IPV4_NETWORK_PREFIX, None)
+        //.l3_ipv4(IPV4_HOST, IPV4_NETWORK_PREFIX, None)
         //.ipv6()
         .packet_information(false)
         .build_sync()?);
@@ -80,8 +80,8 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
         Ipv4Addr::from_octets([192, 168, 174, 1]),
         None,
     ) {
-        Ok(_) => println!("Added default ipv4 route"),
-        Err(e) => eprintln!("Failed to add default ipv4 route: {}", e),
+        Ok(_) => println!("Added default l3_ipv4 route"),
+        Err(e) => eprintln!("Failed to add default l3_ipv4 route: {}", e),
     }
 
     println!();

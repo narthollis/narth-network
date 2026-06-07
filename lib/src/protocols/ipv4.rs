@@ -1,6 +1,6 @@
 pub mod icmp;
 
-use crate::common::WriteToBuffer;
+use crate::write_to_buffer::WriteToBuffer;
 use bitmatch::bitmatch;
 use bytes::BufMut;
 use std::fmt::{Debug, Formatter};

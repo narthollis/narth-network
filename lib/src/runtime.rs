@@ -3,13 +3,12 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 mod address_table;
 pub(in crate::runtime) mod buffer_pool;
-pub(in crate::runtime) mod common;
+pub(in crate::runtime) mod channel;
 pub mod interface;
 pub mod network;
-mod ping;
 mod route_table;
 
-pub use ping::PingResultStatus;
+pub use interface::{PingResultStatus, PingSession};
 
 pub(crate) static BOOT_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 

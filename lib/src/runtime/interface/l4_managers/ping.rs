@@ -1,6 +1,7 @@
 use crate::protocols::ipv4::icmp::{DestinationUnreachableCode, EchoMessage, ICMPMessage};
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
-use crate::runtime::interface::{AsyncSendError, SendError};
+use crate::runtime::interface::l3_ipv4::IPv4Handler;
+use crate::runtime::interface::{AsyncSendError, InterfaceContext, SendError};
 use tracing::error;
 /* region Public */
 #[derive(Debug, Clone, Copy)]
@@ -172,7 +173,7 @@ impl PingManager {
 
     pub(crate) fn perform_timers(
         &mut self,
-        sender: &mut super::interface::SenderContext,
+        sender: &mut InterfaceContext,
     ) -> Option<std::time::Instant> {
         while let Ok(control_message) = self.control_rx.try_recv() {
             match control_message {
@@ -198,7 +199,7 @@ impl PingManager {
     fn process_timers_session(
         entry: &mut PingManagerEntry,
         now: std::time::Instant,
-        sender: &mut super::interface::SenderContext,
+        sender: &mut InterfaceContext,
     ) -> Option<std::time::Instant> {
         // Process Timeouts
         while let Some((_, sent_at)) = entry.pending.front() {
@@ -228,14 +229,14 @@ impl PingManager {
                 #[allow(clippy::cast_possible_truncation)]
                 let sequence = entry.sent_count as u16;
 
-                if sender
-                    .send_ipv4(
-                        entry.target,
-                        std::net::Ipv4Addr::UNSPECIFIED,
-                        IPProtocolTypes::ICMP,
-                        &ICMPMessage::new_echo_request(entry.identifier, sequence),
-                    )
-                    .is_ok()
+                if IPv4Handler::send(
+                    sender,
+                    entry.target,
+                    std::net::Ipv4Addr::UNSPECIFIED,
+                    IPProtocolTypes::ICMP,
+                    &ICMPMessage::new_echo_request(entry.identifier, sequence),
+                )
+                .is_ok()
                 {
                     entry.pending.push_back((sequence, now));
                     entry.last_sent = Some(now);

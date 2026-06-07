@@ -2,7 +2,7 @@ use crate::protocols::ethernet::EthernetHeader;
 use crate::protocols::ethernet::mac::{BROADCAST, MacAddr};
 use crate::runtime::NetworkBridge;
 use crate::runtime::buffer_pool::BufferPool;
-use crate::runtime::common::{
+use crate::runtime::channel::{
     BRIDGE_WAKE_TOKEN, NETWORK_WAKE_TOKEN, NetworkRecvPayload, NetworkSendPayload, NetworkSender,
     RingBufConsumer,
 };
@@ -56,7 +56,7 @@ impl WorkerOrHandle {
 }
 
 struct InterfaceHandle {
-    receiver: super::common::NetworkRecvSender,
+    receiver: super::channel::NetworkRecvSender,
     worker: WorkerOrHandle,
     // interface: Arc<Interface>,
 }

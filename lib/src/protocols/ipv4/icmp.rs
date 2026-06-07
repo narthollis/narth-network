@@ -1,6 +1,7 @@
-use crate::common;
-use crate::common::{WriteToBuffer, err_as_eof};
+use crate::common::err_as_eof;
 use crate::protocols::ipv4::IPv4Header;
+use crate::write_to_buffer;
+use crate::write_to_buffer::WriteToBuffer;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
 
@@ -437,7 +438,7 @@ impl ICMPMessage {
     }
 }
 
-impl common::WriteToBuffer for ICMPMessage {
+impl write_to_buffer::WriteToBuffer for ICMPMessage {
     fn encoded_length(&self) -> usize {
         #[allow(clippy::enum_glob_use)]
         use ICMPMessageTypes::*;

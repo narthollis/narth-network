@@ -1,6 +1,7 @@
 pub mod mac;
 
-use crate::common::{WriteToBuffer, err_as_eof};
+use crate::common::err_as_eof;
+use crate::write_to_buffer::WriteToBuffer;
 use mac::MacAddr;
 use std::fmt::{Debug, Display, Formatter};
 
