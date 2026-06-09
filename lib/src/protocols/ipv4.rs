@@ -238,7 +238,7 @@ impl WriteToBuffer for FragmentDetails {
         4
     }
 
-    fn write_to_buffer<B: BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
         buffer.put_u16(self.identification);
 
         let mut raw = 0u16;
@@ -400,11 +400,11 @@ impl IPv4Header {
         self.fragment_details.more_fragments || self.fragment_details.offset > 0
     }
 
-    pub const fn source_address(&self) -> Ipv4Addr {
-        self.source_address
+    pub const fn source_address(&self) -> &Ipv4Addr {
+        &self.source_address
     }
-    pub const fn destination_address(&self) -> Ipv4Addr {
-        self.destination_address
+    pub const fn destination_address(&self) -> &Ipv4Addr {
+        &self.destination_address
     }
 
     pub const fn payload_length(&self) -> usize {
@@ -421,7 +421,7 @@ impl WriteToBuffer for IPv4Header {
         self.header_len.byte_len() as usize
     }
 
-    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
         use bytes::BufMut;
         // Assert we are only dealing with an option free IPv4 header
         assert_eq!(self.header_len.0, 5);

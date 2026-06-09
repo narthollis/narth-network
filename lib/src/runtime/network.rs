@@ -1,7 +1,8 @@
 use crate::protocols::ethernet::EthernetHeader;
 use crate::protocols::ethernet::mac::{BROADCAST, MacAddr};
+use crate::ready_by_bits::{IterReadyByBits, ReadyByBits};
 use crate::runtime::NetworkBridge;
-use crate::runtime::buffer_pool::BufferPool;
+use crate::runtime::buffer_pool::{BufferPool, WriteTrackingBuffer};
 use crate::runtime::channel::{
     BRIDGE_WAKE_TOKEN, NETWORK_WAKE_TOKEN, NetworkRecvPayload, NetworkSendPayload, NetworkSender,
     RingBufConsumer,
@@ -105,79 +106,8 @@ impl InterfaceSendReceivers {
         }
     }
 
-    fn ready(&mut self) -> ReadySendReceivers<'_> {
-        let ready_bits = [
-            self.ready_bits[0].swap(0, Ordering::Acquire),
-            self.ready_bits[1].swap(0, Ordering::Acquire),
-            self.ready_bits[2].swap(0, Ordering::Acquire),
-            self.ready_bits[3].swap(0, Ordering::Acquire),
-        ];
-
-        ReadySendReceivers {
-            ready_bits,
-            senders: &mut self.senders,
-            current_chunk: 0,
-            // current_bit_idx: 0,
-        }
-    }
-}
-
-struct ReadySendReceivers<'a> {
-    senders: &'a mut [Option<RingBufConsumer<NetworkSendPayload>>],
-    ready_bits: [u64; 4],
-
-    current_chunk: usize,
-}
-impl ReadySendReceivers<'_> {
-    const SENDERS_FULL_LENGTH: usize = const { u64::BITS as usize * 4 };
-}
-
-impl<'a> Iterator for ReadySendReceivers<'a> {
-    type Item = &'a mut RingBufConsumer<NetworkSendPayload>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if self.current_chunk >= self.ready_bits.len() {
-                return None;
-            }
-            if self.ready_bits[self.current_chunk] == 0 {
-                self.current_chunk += 1;
-                continue;
-            }
-
-            // Count the number of trailing zeros to get the index of the next ready index
-            // This lets us skip strait to that ready index
-            let next_ready = self.ready_bits[self.current_chunk].trailing_zeros() as usize;
-
-            // We just need to reset that bit to zero now we are handling it
-            self.ready_bits[self.current_chunk] &= !(1 << next_ready);
-
-            // Convert the local bit index into an absolute index for our Senders array
-            let current = next_ready + (u64::BITS as usize * self.current_chunk);
-            // Then remove the consumed count
-            let current = current - (Self::SENDERS_FULL_LENGTH - self.senders.len());
-
-            // Somehow we were informed that a non-existent sender is ready
-            if self.senders[current].is_none() {
-                continue;
-            }
-
-            // Grab a local copy of senders so we can split it up and get access to just the part containing the sender
-            let local_copy = std::mem::take(&mut self.senders);
-
-            // Split the slice down to be just the item we care about, and everything after that
-            // We need to adjust out bit index by the number of items we ahve already consumed
-            let (_, rest) = local_copy.split_at_mut(current);
-            let (sender, rest) = rest.split_at_mut(1);
-
-            // Return the remaining items to senders
-            self.senders = rest;
-
-            // Extract our sender from the single item &[_] created by the split_at_mut(1)
-            if let Some(sender) = &mut sender[0] {
-                return Some(sender);
-            }
-        }
+    fn ready(&mut self) -> ReadyByBits<'_, RingBufConsumer<NetworkSendPayload>, 4> {
+        self.senders.iter_by_ready_bits(&self.ready_bits)
     }
 }
 
@@ -380,13 +310,14 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
         }
     }
 
-    fn read_bridge(&mut self, pool: &mut BufferPool) -> bool {
+    fn read_bridge(&mut self, pool: &mut BufferPool<WriteTrackingBuffer>) -> bool {
         // TODO Consider some kind of budget to prevent starving out the send side
         loop {
-            let mut buffer = pool.pop().unwrap_or_else(|| {
+            let mut buffer = pool.acquire().unwrap_or_else(|| {
                 // TODO Limit expansion
                 pool.expand(64);
-                pool.pop().expect("buffer pool is exhausted after expand")
+                pool.acquire()
+                    .expect("buffer pool is exhausted after expand")
             });
 
             match self.bridge.recv(&mut buffer) {
@@ -401,7 +332,7 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
                     let s = info_span!("received packet", somerandomid = fastrand::u64(..));
                     let _e = s.enter();
 
-                    self.on_recv(&buffer);
+                    self.on_recv(buffer);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     break;
@@ -436,7 +367,7 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
         }
     }
 
-    fn on_recv(&mut self, frame: &bytes::Bytes) {
+    fn on_recv(&mut self, frame: bytes::Bytes) {
         if frame.len() < EthernetHeader::MIN_LENGTH {
             return;
         }

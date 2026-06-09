@@ -119,7 +119,7 @@ impl InterfaceWorker {
                     return false;
                 }
                 InterfaceControlMessage::BindUdp(addr, reply) => {
-                    _ = reply.send(self.managers.udp_manager.bind(addr));
+                    _ = reply.send(self.managers.udp_manager.bind(&self.context, addr));
                 }
             }
         }

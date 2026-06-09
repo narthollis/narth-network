@@ -231,8 +231,8 @@ impl PingManager {
 
                 if IPv4Handler::send(
                     sender,
-                    entry.target,
-                    std::net::Ipv4Addr::UNSPECIFIED,
+                    &entry.target,
+                    &std::net::Ipv4Addr::UNSPECIFIED,
                     IPProtocolTypes::ICMP,
                     &ICMPMessage::new_echo_request(entry.identifier, sequence),
                 )
@@ -258,7 +258,7 @@ impl PingManager {
         let target = ipv4header.source_address();
         let identifier = message.identifier();
 
-        if let Some(session) = self.sessions.get_mut(&PingEntryKey(target, identifier))
+        if let Some(session) = self.sessions.get_mut(&PingEntryKey(*target, identifier))
             && let Some(index) = session
                 .pending
                 .iter()
@@ -316,7 +316,7 @@ impl PingManager {
 
         if let Some(session) = self
             .sessions
-            .get_mut(&PingEntryKey(header.destination_address(), identifier))
+            .get_mut(&PingEntryKey(*header.destination_address(), identifier))
         {
             if let Some(pending) = session.pending.iter().position(|e| e.0 == sequence_number) {
                 session.pending.remove(pending);

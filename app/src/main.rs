@@ -117,25 +117,39 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Pining device on network");
     ping(&interface, [192, 168, 174, 57].into(), 4);
 
-    println!();
-    println!("Pining host (other network card)");
-    ping(&interface, [192, 168, 174, 175].into(), 4);
+    // println!();
+    // println!("Pining host (other network card)");
+    // ping(&interface, [192, 168, 174, 175].into(), 4);
+    //
+    // println!();
+    // println!("Pining router");
+    // ping(&interface, [192, 168, 174, 1].into(), 4);
+    //
+    // // Unreachable
+    // println!();
+    // println!("Pining net unreachable");
+    // ping(&interface, [192, 0, 2, 1].into(), 4);
+    // println!();
+    // println!("Pining host unreachable");
+    // ping(&interface, [198, 51, 100, 1].into(), 4);
+    //
+    // println!();
+    // println!("Ping the internet!");
+    // ping(&interface, [1, 1, 1, 1].into(), 4);
 
-    println!();
-    println!("Pining router");
-    ping(&interface, [192, 168, 174, 1].into(), 4);
-
-    // Unreachable
-    println!();
-    println!("Pining net unreachable");
-    ping(&interface, [192, 0, 2, 1].into(), 4);
-    println!();
-    println!("Pining host unreachable");
-    ping(&interface, [198, 51, 100, 1].into(), 4);
-
-    println!();
-    println!("Ping the internet!");
-    ping(&interface, [1, 1, 1, 1].into(), 4);
+    let udp = interface.bind_udp("0.0.0.0:12345")?;
+    loop {
+        let mut buff = vec![0u8; MTU as usize];
+        match udp.recv_from(&mut buff) {
+            Ok((s, addr)) => {
+                println!("Received: {}", String::from_utf8_lossy(&buff[0..s]));
+                udp.send_to(&buff[0..s], addr)?;
+            }
+            Err(err) => {
+                println!("UDP recv error: {}", err);
+            }
+        }
+    }
 
     jh.join().expect("Failed to join network thread");
 

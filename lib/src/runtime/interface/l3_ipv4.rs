@@ -3,7 +3,8 @@ use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
 use crate::runtime::interface::l4_managers::Managers;
 use crate::runtime::interface::{AsyncSendError, InterfaceContext, SendError, SendResult};
 use crate::write_to_buffer::WriteToBuffer;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
+use std::ops::Deref;
 use tracing::{debug, info, trace, trace_span};
 
 #[derive(Debug)]
@@ -35,8 +36,8 @@ impl IPv4Handler {
         match ip.protocol() {
             IPProtocolTypes::ICMP => Self::recv_icmp(ctx, managers, ip, payload),
             IPProtocolTypes::UDP => managers.udp_manager.recv(
-                ip.source_address().into(),
-                ip.destination_address().into(),
+                IpAddr::V4(*ip.source_address()),
+                IpAddr::V4(*ip.destination_address()),
                 payload,
             ),
             IPProtocolTypes::TCP => {
@@ -93,8 +94,8 @@ impl IPv4Handler {
 
     pub fn send(
         ctx: &mut InterfaceContext,
-        destination: Ipv4Addr,
-        source: Ipv4Addr,
+        destination: &Ipv4Addr,
+        source: &Ipv4Addr,
         protocol: IPProtocolTypes,
         payload: &impl WriteToBuffer,
     ) -> SendResult {
@@ -124,9 +125,9 @@ impl IPv4Handler {
         };
         let source = source.or_unspecified(route.source);
 
-        let header = IPv4Header::new(protocol, source, destination, payload_len);
+        let header = IPv4Header::new(protocol, source, *destination, payload_len);
 
-        let next_hop = route.next_hop.unwrap_or(destination);
+        let next_hop = route.next_hop.unwrap_or(*destination);
 
         super::l2_ethernet::EthernetHandler::send_ipv4(ctx, next_hop, source, header, payload)
     }

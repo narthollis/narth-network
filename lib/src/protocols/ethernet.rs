@@ -153,7 +153,7 @@ impl WriteToBuffer for EthernetHeader {
         }
     }
 
-    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
         buffer.put_slice(&self.destination_address.octets());
         buffer.put_slice(&self.source_address.octets());
 

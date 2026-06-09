@@ -231,7 +231,7 @@ impl WriteToBuffer for EchoMessageDataUnix {
         Self::LENGTH
     }
 
-    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
         buffer.put_u64_ne(self.since_epoc.as_secs());
         buffer.put_u64_ne(self.since_epoc.subsec_micros() as u64);
 
@@ -482,7 +482,7 @@ impl write_to_buffer::WriteToBuffer for ICMPMessage {
         }
     }
 
-    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
         use ICMPMessageTypes::*;
         use bytes::BufMut;
 

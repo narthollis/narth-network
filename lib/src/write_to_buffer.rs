@@ -2,7 +2,7 @@ use bytes::{BufMut, Bytes};
 
 pub trait WriteToBuffer {
     fn encoded_length(&self) -> usize;
-    fn write_to_buffer<B: BufMut>(&self, buffer: &mut B);
+    fn write_to_buffer<Buf: BufMut>(&self, buffer: Buf);
 }
 
 impl WriteToBuffer for Bytes {
@@ -10,7 +10,7 @@ impl WriteToBuffer for Bytes {
         self.len()
     }
 
-    fn write_to_buffer<B: BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
         buffer.put_slice(self);
     }
 }
@@ -20,7 +20,7 @@ impl<T: ?Sized + WriteToBuffer> WriteToBuffer for &T {
         (*self).encoded_length()
     }
 
-    fn write_to_buffer<B: BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
         (*self).write_to_buffer(buffer);
     }
 }
@@ -34,9 +34,9 @@ where
         self.0.encoded_length() + self.1.encoded_length()
     }
 
-    fn write_to_buffer<Buf: BufMut>(&self, buffer: &mut Buf) {
-        self.0.write_to_buffer(buffer);
-        self.1.write_to_buffer(buffer);
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
+        self.0.write_to_buffer(&mut buffer);
+        self.1.write_to_buffer(&mut buffer);
     }
 }
 
@@ -50,9 +50,9 @@ where
         self.0.encoded_length() + self.1.encoded_length() + self.2.encoded_length()
     }
 
-    fn write_to_buffer<Buf: BufMut>(&self, buffer: &mut Buf) {
-        self.0.write_to_buffer(buffer);
-        self.1.write_to_buffer(buffer);
-        self.2.write_to_buffer(buffer);
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
+        self.0.write_to_buffer(&mut buffer);
+        self.1.write_to_buffer(&mut buffer);
+        self.2.write_to_buffer(&mut buffer);
     }
 }

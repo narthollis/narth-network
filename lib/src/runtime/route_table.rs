@@ -74,8 +74,8 @@ impl<T: Ord + BitAnd<Output = T> + Clone + Copy> RouteTable<T> {
         self.update_shared();
     }
 
-    pub fn lookup(&self, target: T) -> Option<&RouteInformation<T>> {
-        self.routes.iter().find(|r| (target & r.mask) == r.target)
+    pub fn lookup(&self, target: &T) -> Option<&RouteInformation<T>> {
+        self.routes.iter().find(|r| (*target & r.mask) == r.target)
     }
 }
 

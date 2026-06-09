@@ -223,7 +223,7 @@ impl write_to_buffer::WriteToBuffer for ArpMessage {
         Self::ARP_LENGTH
     }
 
-    fn write_to_buffer<B: bytes::BufMut>(&self, buffer: &mut B) {
+    fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
         buffer.put_u16(HardwareType::Ethernet.into());
         buffer.put_u16(ProtocolType::IPv4.into());
 
