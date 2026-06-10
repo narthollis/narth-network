@@ -1,3 +1,4 @@
+use narth_net::poller::Poller;
 use narth_net::protocols::ethernet::mac::MacAddr;
 use narth_net::runtime::interface::Interface;
 use narth_net::runtime::network::Network;
@@ -143,7 +144,7 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
         match udp.recv_from(&mut buff) {
             Ok((s, addr)) => {
                 println!("Received: {}", String::from_utf8_lossy(&buff[0..s]));
-                udp.send_to(&buff[0..s], addr)?;
+                //udp.send_to(&buff[0..s], addr)?;
             }
             Err(err) => {
                 println!("UDP recv error: {}", err);

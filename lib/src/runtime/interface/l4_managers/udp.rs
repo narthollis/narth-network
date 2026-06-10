@@ -5,13 +5,13 @@ use crate::ready_by_bits::IterReadyByBits;
 use crate::runtime::buffer_pool::{BufferPool, WriteTrackingBuffer};
 use crate::runtime::interface::l3_ipv4::IPv4Handler;
 use crate::runtime::interface::{InterfaceContext, SendResult};
-use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::traits::{Producer, Split};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::io::{Error, ErrorKind, Result};
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, LockResult, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Debug)]
 pub struct UdpManager {

@@ -9,7 +9,6 @@ use crate::runtime::channel::{
 };
 use crate::runtime::interface::{Interface, InterfaceWorker};
 use std::fmt::{Debug, Formatter};
-use std::sync::atomic::Ordering;
 use tracing::{error, info, info_span, trace, warn};
 
 #[derive(thiserror::Error, Debug)]

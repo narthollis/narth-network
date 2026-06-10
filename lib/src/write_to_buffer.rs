@@ -20,7 +20,7 @@ impl<T: ?Sized + WriteToBuffer> WriteToBuffer for &T {
         (*self).encoded_length()
     }
 
-    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
+    fn write_to_buffer<Buf: BufMut>(&self, buffer: Buf) {
         (*self).write_to_buffer(buffer);
     }
 }

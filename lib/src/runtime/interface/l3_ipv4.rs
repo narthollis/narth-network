@@ -4,7 +4,6 @@ use crate::runtime::interface::l4_managers::Managers;
 use crate::runtime::interface::{AsyncSendError, InterfaceContext, SendError, SendResult};
 use crate::write_to_buffer::WriteToBuffer;
 use std::net::{IpAddr, Ipv4Addr};
-use std::ops::Deref;
 use tracing::{debug, info, trace, trace_span};
 
 #[derive(Debug)]
