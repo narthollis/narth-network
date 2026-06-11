@@ -79,7 +79,7 @@ impl InterfaceWorker {
                 }
             }
 
-            self.managers.udp_manager.handle_send(&mut self.context);
+            self.managers.udp_manager.process_buffers(&mut self.context);
 
             let deadline = self.perform_timers();
 

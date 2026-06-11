@@ -2,6 +2,7 @@ use crate::protocols::ipv4::IPProtocolTypes;
 use crate::write_to_buffer::WriteToBuffer;
 use std::net::Ipv4Addr;
 
+#[derive(Debug, Copy, Clone)]
 pub struct UdpHeader {
     source_port: u16,
     destination_port: u16,
@@ -12,8 +13,9 @@ pub struct UdpHeader {
 impl UdpHeader {
     pub const LENGTH: usize = 8;
 
-    pub fn new(source_port: u16, destination_port: u16, payload_length: u16) -> UdpHeader {
-        UdpHeader {
+    #[must_use]
+    pub const fn new(source_port: u16, destination_port: u16, payload_length: u16) -> Self {
+        Self {
             source_port,
             destination_port,
             length: payload_length + Self::LENGTH as u16,
@@ -21,15 +23,15 @@ impl UdpHeader {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> std::io::Result<UdpHeader> {
-        if bytes.len() < UdpHeader::LENGTH {
+    pub fn from_bytes(bytes: &[u8]) -> std::io::Result<Self> {
+        if bytes.len() < Self::LENGTH {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "Invalid length for UDP header",
             ));
         }
 
-        Ok(UdpHeader {
+        Ok(Self {
             source_port: u16::from_be_bytes([bytes[0], bytes[1]]),
             destination_port: u16::from_be_bytes([bytes[2], bytes[3]]),
             length: u16::from_be_bytes([bytes[4], bytes[5]]),
@@ -80,6 +82,18 @@ impl UdpHeader {
         data: &[u8],
     ) {
         self.checksum = self.compute_checksum_v4(source_addr, destination_addr, data);
+    }
+
+    pub fn payload_length(&self) -> usize {
+        self.length as usize
+    }
+
+    pub fn destination_port(&self) -> u16 {
+        self.destination_port
+    }
+
+    pub fn source_port(&self) -> u16 {
+        self.source_port
     }
 }
 

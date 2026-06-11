@@ -1,3 +1,4 @@
+use crate::poller::{PollerReadRegister, PollerWriteRegister, WakeHandle};
 use crate::protocols::ethernet::EthernetHeader;
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
 use crate::protocols::udp::UdpHeader;
@@ -5,11 +6,13 @@ use crate::ready_by_bits::IterReadyByBits;
 use crate::runtime::buffer_pool::{BufferPool, WriteTrackingBuffer};
 use crate::runtime::interface::l3_ipv4::IPv4Handler;
 use crate::runtime::interface::{InterfaceContext, SendResult};
-use ringbuf::traits::{Producer, Split};
+use crate::write_to_buffer::WriteToBuffer;
+use ringbuf::consumer::Consumer;
+use ringbuf::traits::{Observer, Producer, Split};
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::io::{Error, ErrorKind, Result};
-use std::net::{IpAddr, SocketAddr, SocketAddrV4, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -72,8 +75,6 @@ impl UdpManager {
         self.socket_ids[socket_id] = Some(addr);
 
         let shared_state = Arc::new(UdpSocketSharedState {
-            recv_waker: Mutex::default(),
-            send_waker: Mutex::default(),
             send_result: Mutex::default(),
 
             connected_to: RwLock::default(),
@@ -92,6 +93,9 @@ impl UdpManager {
             send_rx,
             connected_to: None,
             shared_state: shared_state.clone(),
+            socket_addr: addr,
+            read_wake_handle: None,
+            write_wake_handle: None,
         };
         let socket = UdpSocket {
             context: UdpSocketContext {
@@ -119,10 +123,116 @@ impl UdpManager {
     }
 
     pub fn recv(&mut self, source_addr: IpAddr, destination_addr: IpAddr, bytes: &bytes::Bytes) {
-        todo!()
+        let udp_header = match UdpHeader::from_bytes(bytes) {
+            Ok(udp_header) => udp_header,
+            _ => return,
+        };
+
+        let payload = bytes.slice(udp_header.encoded_length()..udp_header.encoded_length());
+
+        match (source_addr, destination_addr) {
+            (IpAddr::V4(source), IpAddr::V4(destination)) => {
+                if !udp_header.validate_checksum_v4(&source, &destination, &payload) {
+                    return;
+                }
+            }
+            (IpAddr::V6(source), IpAddr::V6(destination)) => {
+                todo!("validate udp6 {source:?} {destination:?}")
+            }
+            _ => return, // Miss-matched address kinds
+        };
+
+        let socket = {
+            // First try and find the socket by actual IP
+            if let Some(socket) = self.sockets.get_mut(&SocketAddr::new(
+                destination_addr,
+                udp_header.destination_port(),
+            )) {
+                socket
+            } else if let Some(socket) = self.sockets.get_mut(&SocketAddr::new(
+                destination_addr.to_unspecified(),
+                udp_header.destination_port(),
+            )) {
+                socket
+            } else {
+                return;
+            }
+        };
+
+        if let Ok(_) = socket.recv_tx.try_push(UdpRecvMessage::Packet {
+            source: SocketAddr::new(source_addr, udp_header.source_port()),
+            payload,
+        }) && let Some(wake) = socket.read_wake_handle.as_ref()
+        {
+            wake.wake();
+        }
     }
 
-    pub fn send_ipv4(
+    pub fn process_buffers(&mut self, ctx: &mut InterfaceContext) {
+        for ready in self.socket_ids.iter_by_ready_bits(&self.ready_bits) {
+            if let Some(socket) = self.sockets.get_mut(ready) {
+                socket.drain_send(ctx);
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UdpSocketSharedState {
+    send_result: Mutex<Option<SendResult>>,
+
+    connected_to: RwLock<Option<SocketAddr>>,
+    is_nonblocking: AtomicBool,
+    allow_broadcast: AtomicBool,
+    mtu: AtomicU32,
+}
+
+enum UdpSendMessage {
+    NonBlocking {
+        destination: SocketAddr,
+        payload: bytes::Bytes,
+    },
+    Blocking {
+        destination: SocketAddr,
+        payload: bytes::Bytes,
+        thread: std::thread::Thread,
+    },
+    UpdateReadWakeHandle(ReadWakeHandle),
+    UpdateWriteWakeHandle(WakeHandle),
+}
+enum UdpRecvMessage {
+    Packet {
+        source: SocketAddr,
+        payload: bytes::Bytes,
+    },
+}
+
+struct UdpSocketHandle {
+    recv_tx: ringbuf::HeapProd<UdpRecvMessage>,
+    send_rx: ringbuf::HeapCons<UdpSendMessage>,
+
+    connected_to: Option<SocketAddr>,
+    shared_state: Arc<UdpSocketSharedState>,
+    socket_addr: SocketAddr,
+
+    read_wake_handle: Option<ReadWakeHandle>,
+    write_wake_handle: Option<WakeHandle>,
+}
+
+impl Debug for UdpSocketHandle {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpSocketHandle")
+            .field("recv_tx", &"ringbuf::HeapProd<UdpRecvMessage>")
+            .field("send_rx", &"ringbuf::HeapCons<UdpSendMessage>")
+            .field("connected_to", &self.connected_to)
+            .field("shared_state", &self.shared_state)
+            .field("socket_addr", &self.socket_addr)
+            .finish()
+    }
+}
+
+impl UdpSocketHandle {
+    fn send_ipv4(
         ctx: &mut InterfaceContext,
         source: SocketAddrV4,
         destination: SocketAddrV4,
@@ -147,66 +257,96 @@ impl UdpManager {
         )
     }
 
-    pub fn handle_send(&mut self, ctx: &mut InterfaceContext) {
-        use ringbuf::traits::Consumer;
+    fn send_ipv6(
+        ctx: &mut InterfaceContext,
+        source: SocketAddrV6,
+        destination: SocketAddrV6,
+        payload: &bytes::Bytes,
+    ) -> SendResult {
+        todo!("implement udp over ipv6 {ctx:?} {source:?} {destination:?} {payload:?}");
+    }
 
-        for ready in self.socket_ids.iter_by_ready_bits(&self.ready_bits) {
-            if let Some(socket) = self.sockets.get_mut(ready) {
-                while let Some(UdpSendMessage::Packet {
+    fn send_datagram(
+        &self,
+        ctx: &mut InterfaceContext,
+        destination: SocketAddr,
+        payload: bytes::Bytes,
+    ) -> SendResult {
+        match (self.socket_addr, destination) {
+            (SocketAddr::V4(s), SocketAddr::V4(d)) => Self::send_ipv4(ctx, s, d, &payload),
+            (SocketAddr::V6(s), SocketAddr::V6(d)) => Self::send_ipv6(ctx, s, d, &payload),
+            // how the hell did we get here? just drop it
+            _ => Ok(()),
+        }
+    }
+
+    fn send_datagram_blocking(
+        &self,
+        ctx: &mut InterfaceContext,
+        destination: SocketAddr,
+        payload: bytes::Bytes,
+        thread: std::thread::Thread,
+    ) {
+        let result = self.send_datagram(ctx, destination, payload);
+        // If the lock is poisoned carry on - not a lot we can do
+        if let Ok(mut lock) = self.shared_state.send_result.lock() {
+            *lock = Some(result);
+        }
+        thread.unpark();
+    }
+
+    pub fn drain_send(&mut self, ctx: &mut InterfaceContext) {
+        while let Some(message) = self.send_rx.try_pop() {
+            match message {
+                UdpSendMessage::NonBlocking {
                     destination,
                     payload,
-                }) = socket.send_rx.try_pop()
-                {
-                    if let SocketAddr::V4(source) = ready
-                        && let SocketAddr::V4(dest) = destination
-                        && let Err(err) = Self::send_ipv4(ctx, *source, dest, &payload)
+                } => {
+                    _ = self.send_datagram(ctx, destination, payload);
+                    if !self.send_rx.is_full()
+                        && let Some(write_wake) = &self.write_wake_handle
                     {
-                        // TODO need to write this back to the client
+                        write_wake.wake();
+                    }
+                }
+                UdpSendMessage::Blocking {
+                    destination,
+                    payload,
+                    thread,
+                } => self.send_datagram_blocking(ctx, destination, payload, thread),
+                UdpSendMessage::UpdateReadWakeHandle(handle) => {
+                    _ = self.read_wake_handle.replace(handle);
+                    if !self.recv_tx.is_empty() {
+                        self.read_wake_handle
+                            .as_mut()
+                            .expect("we just set this 2 lines ago")
+                            .wake();
+                    }
+                }
+                UdpSendMessage::UpdateWriteWakeHandle(handle) => {
+                    _ = self.write_wake_handle.replace(handle);
+                    if !self.send_rx.is_full() {
+                        self.write_wake_handle
+                            .as_ref()
+                            .expect("we just set this 2 lines ago")
+                            .wake();
                     }
                 }
             }
         }
-
-        todo!("work out which of our sockets need sending and send stuff");
     }
 }
 
-#[derive(Debug)]
-struct UdpSocketSharedState {
-    recv_waker: Mutex<Option<std::thread::Thread>>,
-    send_waker: Mutex<Option<std::thread::Thread>>,
-    send_result: Mutex<Option<SendResult>>,
-
-    connected_to: RwLock<Option<SocketAddr>>,
-    is_nonblocking: AtomicBool,
-    allow_broadcast: AtomicBool,
-    mtu: AtomicU32,
+enum ReadWakeHandle {
+    Poller(WakeHandle),
+    Local(std::thread::Thread),
 }
-
-enum UdpSendMessage {
-    Packet {
-        destination: SocketAddr,
-        payload: bytes::Bytes,
-    },
-}
-enum UdpRecvMessage {}
-
-struct UdpSocketHandle {
-    recv_tx: ringbuf::HeapProd<UdpRecvMessage>,
-    send_rx: ringbuf::HeapCons<UdpSendMessage>,
-
-    connected_to: Option<SocketAddr>,
-    shared_state: Arc<UdpSocketSharedState>,
-}
-
-impl Debug for UdpSocketHandle {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UdpSocketHandle")
-            .field("recv_tx", &"ringbuf::HeapProd<UdpRecvMessage>")
-            .field("send_rx", &"ringbuf::HeapCons<UdpSendMessage>")
-            .field("connected_to", &self.connected_to)
-            .field("shared_state", &self.shared_state)
-            .finish()
+impl ReadWakeHandle {
+    fn wake(&self) {
+        match self {
+            ReadWakeHandle::Poller(wake_handle) => wake_handle.wake(),
+            ReadWakeHandle::Local(thread) => thread.unpark(),
+        }
     }
 }
 
@@ -240,8 +380,6 @@ pub struct UdpSocket {
 }
 
 impl UdpSocket {
-    // TODO - need some kind of register_for_wake()
-
     /// Receives a single datagram message on the socket. On success, returns the number
     /// of bytes read and the origin.
     ///
@@ -254,8 +392,38 @@ impl UdpSocket {
     /// call does so.
     ///
     /// [see std implementation](std::net::UdpSocket::recv_from)
-    pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
-        todo!()
+    pub fn recv_from(&mut self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+        if let Some(UdpRecvMessage::Packet { source, payload }) = self.context.recv_rx.try_pop() {
+            let copy_len = std::cmp::min(buf.len(), payload.len());
+            buf[..copy_len].copy_from_slice(&payload[..copy_len]);
+            return Ok((copy_len, source));
+        }
+
+        if self.shared_state.is_nonblocking.load(Ordering::Acquire) {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+
+        self.context
+            .try_push(UdpSendMessage::UpdateReadWakeHandle(ReadWakeHandle::Local(
+                std::thread::current(),
+            )))
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::OutOfMemory,
+                    "could not send wait handle to network handler",
+                )
+            })?;
+
+        loop {
+            if let Some(UdpRecvMessage::Packet { source, payload }) = self.context.recv_rx.try_pop()
+            {
+                let copy_len = std::cmp::min(buf.len(), payload.len());
+                buf[..copy_len].copy_from_slice(&payload[..copy_len]);
+                return Ok((copy_len, source));
+            }
+
+            std::thread::park();
+        }
     }
 
     /// Receives a single datagram message on the socket, without removing it from the
@@ -313,7 +481,7 @@ impl UdpSocket {
         }
 
         if self.shared_state.is_nonblocking.load(Ordering::Acquire) {
-            self.context.send_inner(buf, destination)
+            self.context.send_inner(buf, destination, false)
         } else {
             self.send_to_blocking(buf, destination)
         }
@@ -396,7 +564,7 @@ impl UdpSocket {
         };
 
         if self.shared_state.is_nonblocking.load(Ordering::Acquire) {
-            self.context.send_inner(buf, destination)
+            self.context.send_inner(buf, destination, false)
         } else {
             self.send_to_blocking(buf, destination)
         }
@@ -464,15 +632,7 @@ impl UdpSocket {
 
 impl UdpSocket {
     fn send_to_blocking(&mut self, buf: &[u8], destination: SocketAddr) -> Result<usize> {
-        let mut lock = self
-            .shared_state
-            .send_waker
-            .lock()
-            .expect("recv_waker poisoned");
-        let written = self.context.send_inner(buf, destination)?;
-
-        lock.replace(std::thread::current());
-        drop(lock);
+        let written = self.context.send_inner(buf, destination, true)?;
 
         let result = loop {
             let potential_result = self
@@ -509,7 +669,7 @@ impl UdpSocketContext {
         Ok(())
     }
 
-    fn send_inner(&mut self, buf: &[u8], destination: SocketAddr) -> Result<usize> {
+    fn send_inner(&mut self, buf: &[u8], destination: SocketAddr, blocking: bool) -> Result<usize> {
         if buf.len() > self.buffer_pool.buffer_size() {
             return Err(Error::new(ErrorKind::InvalidInput, "buffer too large"));
         }
@@ -521,16 +681,69 @@ impl UdpSocketContext {
         buffer[..buf.len()].copy_from_slice(buf);
         buffer.advance(buf.len());
         let written = buffer.len();
+        let payload = bytes::Bytes::from_owner(buffer);
 
         Self::try_push(
             self,
-            UdpSendMessage::Packet {
-                destination,
-                payload: bytes::Bytes::from_owner(buffer),
+            if blocking {
+                UdpSendMessage::Blocking {
+                    destination,
+                    payload,
+                    thread: std::thread::current(),
+                }
+            } else {
+                UdpSendMessage::NonBlocking {
+                    destination,
+                    payload,
+                }
             },
         )
         .map_err(|_| Error::new(ErrorKind::OutOfMemory, "failed to push packet to ringbuf"))?;
 
         Ok(written)
+    }
+}
+
+impl PollerReadRegister for UdpSocket {
+    fn register_read(&mut self, handle: WakeHandle) -> Result<()> {
+        self.context
+            .send_tx
+            .try_push(UdpSendMessage::UpdateReadWakeHandle(
+                ReadWakeHandle::Poller(handle),
+            ))
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::OutOfMemory,
+                    "failed to push wake handle to handler",
+                )
+            })?;
+        Ok(())
+    }
+}
+
+impl PollerWriteRegister for UdpSocket {
+    fn register_write(&mut self, handle: WakeHandle) -> Result<()> {
+        self.context
+            .send_tx
+            .try_push(UdpSendMessage::UpdateWriteWakeHandle(handle))
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::OutOfMemory,
+                    "failed to push wake handle to handler",
+                )
+            })?;
+        Ok(())
+    }
+}
+
+trait Unspecified {
+    fn to_unspecified(&self) -> IpAddr;
+}
+impl Unspecified for IpAddr {
+    fn to_unspecified(&self) -> IpAddr {
+        match self {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        }
     }
 }

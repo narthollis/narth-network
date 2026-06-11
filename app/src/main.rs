@@ -138,13 +138,13 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
     // println!("Ping the internet!");
     // ping(&interface, [1, 1, 1, 1].into(), 4);
 
-    let udp = interface.bind_udp("0.0.0.0:12345")?;
+    let mut udp = interface.bind_udp("0.0.0.0:12345")?;
     loop {
         let mut buff = vec![0u8; MTU as usize];
         match udp.recv_from(&mut buff) {
             Ok((s, addr)) => {
                 println!("Received: {}", String::from_utf8_lossy(&buff[0..s]));
-                //udp.send_to(&buff[0..s], addr)?;
+                udp.send_to(&buff[0..s], addr)?;
             }
             Err(err) => {
                 println!("UDP recv error: {}", err);

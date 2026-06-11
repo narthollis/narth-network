@@ -155,7 +155,7 @@ impl Poller {
 
     pub fn register(
         &mut self,
-        target: &(impl PollerReadRegister + PollerWriteRegister),
+        target: &mut (impl PollerReadRegister + PollerWriteRegister),
     ) -> std::io::Result<Rc<Token>> {
         let (chunk_index, bit_index, token, shared_state) = self.get_free_token();
 
@@ -177,7 +177,7 @@ impl Poller {
 
     pub fn register_read(
         &mut self,
-        target: &impl PollerReadRegister,
+        target: &mut impl PollerReadRegister,
     ) -> std::io::Result<Rc<Token>> {
         let (chunk_index, bit_index, token, shared_state) = self.get_free_token();
 
@@ -193,7 +193,7 @@ impl Poller {
 
     pub fn register_write(
         &mut self,
-        target: &impl PollerWriteRegister,
+        target: &mut impl PollerWriteRegister,
     ) -> std::io::Result<Rc<Token>> {
         let (chunk_index, bit_index, token, shared_state) = self.get_free_token();
 
@@ -247,10 +247,10 @@ impl Poller {
 }
 
 pub trait PollerReadRegister {
-    fn register_read(&self, handle: WakeHandle) -> std::io::Result<()>;
+    fn register_read(&mut self, handle: WakeHandle) -> std::io::Result<()>;
 }
 pub trait PollerWriteRegister {
-    fn register_write(&self, handle: WakeHandle) -> std::io::Result<()>;
+    fn register_write(&mut self, handle: WakeHandle) -> std::io::Result<()>;
 }
 
 #[derive(Debug, Copy, Clone)]
