@@ -2,6 +2,7 @@
   <dictionary name="project">
     <words>
       <w>ethernet</w>
+      <w>ringbuf</w>
     </words>
   </dictionary>
 </component>

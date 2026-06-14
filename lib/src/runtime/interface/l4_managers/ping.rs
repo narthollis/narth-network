@@ -229,12 +229,15 @@ impl PingManager {
                 #[allow(clippy::cast_possible_truncation)]
                 let sequence = entry.sent_count as u16;
 
+                let mut request = ICMPMessage::new_echo_request(entry.identifier, sequence);
+                request.compute_checksum_and_update();
+
                 if IPv4Handler::send(
                     sender,
-                    &entry.target,
-                    &std::net::Ipv4Addr::UNSPECIFIED,
+                    std::net::Ipv4Addr::UNSPECIFIED,
+                    entry.target,
                     IPProtocolTypes::ICMP,
-                    &ICMPMessage::new_echo_request(entry.identifier, sequence),
+                    request,
                 )
                 .is_ok()
                 {
@@ -258,7 +261,7 @@ impl PingManager {
         let target = ipv4header.source_address();
         let identifier = message.identifier();
 
-        if let Some(session) = self.sessions.get_mut(&PingEntryKey(*target, identifier))
+        if let Some(session) = self.sessions.get_mut(&PingEntryKey(target, identifier))
             && let Some(index) = session
                 .pending
                 .iter()
@@ -316,7 +319,7 @@ impl PingManager {
 
         if let Some(session) = self
             .sessions
-            .get_mut(&PingEntryKey(*header.destination_address(), identifier))
+            .get_mut(&PingEntryKey(header.destination_address(), identifier))
         {
             if let Some(pending) = session.pending.iter().position(|e| e.0 == sequence_number) {
                 session.pending.remove(pending);

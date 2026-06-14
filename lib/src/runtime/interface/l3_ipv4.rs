@@ -35,8 +35,8 @@ impl IPv4Handler {
         match ip.protocol() {
             IPProtocolTypes::ICMP => Self::recv_icmp(ctx, managers, ip, payload),
             IPProtocolTypes::UDP => managers.udp_manager.recv(
-                IpAddr::V4(*ip.source_address()),
-                IpAddr::V4(*ip.destination_address()),
+                IpAddr::V4(ip.source_address()),
+                IpAddr::V4(ip.destination_address()),
                 payload,
             ),
             IPProtocolTypes::TCP => {
@@ -65,14 +65,15 @@ impl IPv4Handler {
         trace!("Incoming IPv4 ICMP: {:?}", icmp);
 
         match &icmp.message {
-            ICMPMessageTypes::Echo(echo) => {
-                let echo_reply = ICMPMessage::echo_reply(echo);
+            ICMPMessageTypes::EchoRequest(echo) => {
+                let mut echo_reply = ICMPMessage::echo_reply(echo);
+                echo_reply.compute_checksum_and_update();
 
                 // We don't really care if we fail to send the echo reply
-                _ = IPv4Handler::send(
+                _ = Self::send(
                     ctx,
-                    ipv4_header.source_address(),
                     ipv4_header.destination_address(),
+                    ipv4_header.source_address(),
                     IPProtocolTypes::ICMP,
                     &echo_reply,
                 );
@@ -93,46 +94,45 @@ impl IPv4Handler {
 
     pub fn send(
         ctx: &mut InterfaceContext,
-        destination: &Ipv4Addr,
-        source: &Ipv4Addr,
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
         protocol: IPProtocolTypes,
-        payload: &impl WriteToBuffer,
+        payload: impl WriteToBuffer,
     ) -> SendResult {
         // ICMP requires the first 64 bits/8 bytes of the payload be included in control messages - so an IP frame
         // less than that should be considered mal-formed
         if payload.encoded_length() < 8 {
             return Err(SendError::PayloadTooShort);
         }
+
         // This is where we should do fragmentation if were supported it
         // I'm not going to support that, so sync-reject
         // TODO This is where we would handle the Path MTU lookup
-        if (payload.encoded_length() + IPv4Header::MIN_LENGTH) > ctx.mtu {
+        if (payload.encoded_length() + IPv4Header::LENGTH_NO_OPTIONS) > ctx.mtu {
             return Err(SendError::PayloadTooLarge {
-                max_size: ctx.mtu - IPv4Header::MIN_LENGTH,
+                max_size: ctx.mtu - IPv4Header::LENGTH_NO_OPTIONS,
             });
         }
-
-        let payload = {
-            let mut buff = bytes::BytesMut::with_capacity(payload.encoded_length());
-            payload.write_to_buffer(&mut buff);
-            buff.freeze()
-        };
-        let payload_len: u16 = payload.len().try_into().expect("payload length overflow");
 
         let Some(route) = ctx.ipv4_route_table.lookup(destination) else {
             return Err(SendError::NoRouteToHost);
         };
         let source = source.or_unspecified(route.source);
 
-        let header = IPv4Header::new(protocol, source, *destination, payload_len);
+        let header = IPv4Header::new(
+            protocol,
+            source,
+            destination,
+            payload.encoded_length() as u16,
+        );
 
-        let next_hop = route.next_hop.unwrap_or(*destination);
+        let next_hop = route.next_hop.unwrap_or(destination);
 
         super::l2_ethernet::EthernetHandler::send_ipv4(ctx, next_hop, source, header, payload)
     }
 }
 
-trait OrUnspecified {
+pub(crate) trait OrUnspecified {
     fn or_unspecified(self, other: Self) -> Self;
 }
 impl OrUnspecified for Ipv4Addr {

@@ -17,7 +17,7 @@ pub use arp_table::{ArpState, ArpTable};
 use std::net::Ipv4Addr;
 use tracing::{debug, error, trace, trace_span};
 
-pub(crate) struct EthernetHandler {}
+pub struct EthernetHandler {}
 
 impl EthernetHandler {
     pub fn send(
@@ -39,7 +39,7 @@ impl EthernetHandler {
         next_hop: Ipv4Addr,
         source: Ipv4Addr,
         header: IPv4Header,
-        payload: bytes::Bytes,
+        payload: impl WriteToBuffer,
     ) -> SendResult {
         let arp_state = ctx.arp_table.request(next_hop, source);
         trace!("arp table said {:?} for {}", arp_state, next_hop);
@@ -58,6 +58,11 @@ impl EthernetHandler {
                 trace!("so we buffer the message");
                 let buff = ctx.ipv4_send_buffer.entry(next_hop).or_default();
                 if buff.len() < InterfaceWorker::MAX_IPV4_PENDING_BUFFER_SIZE {
+                    let payload = {
+                        let mut buff = bytes::BytesMut::with_capacity(payload.encoded_length());
+                        payload.write_to_buffer(&mut buff);
+                        buff.freeze()
+                    };
                     buff.push_back((header, payload));
                     Ok(())
                 } else {

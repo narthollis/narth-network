@@ -30,8 +30,6 @@ impl InterfaceContext {
     pub fn send(&mut self, packet: &impl WriteToBuffer) -> SendResult {
         trace!("sending packet");
 
-        assert!(packet.encoded_length() <= self.mtu);
-
         let mut buffer = bytes::BytesMut::with_capacity(self.mtu);
         packet.write_to_buffer(&mut buffer);
         buffer.truncate(buffer.len());

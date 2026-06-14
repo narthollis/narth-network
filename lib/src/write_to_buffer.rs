@@ -1,6 +1,7 @@
 use bytes::{BufMut, Bytes};
+use std::fmt::Debug;
 
-pub trait WriteToBuffer {
+pub trait WriteToBuffer: Debug {
     fn encoded_length(&self) -> usize;
     fn write_to_buffer<Buf: BufMut>(&self, buffer: Buf);
 }

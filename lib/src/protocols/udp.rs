@@ -7,7 +7,7 @@ pub struct UdpHeader {
     source_port: u16,
     destination_port: u16,
     length: u16,
-    checksum: [u8; 2],
+    pub(crate) checksum: [u8; 2],
 }
 
 impl UdpHeader {
@@ -39,6 +39,7 @@ impl UdpHeader {
         })
     }
 
+    #[must_use]
     pub fn compute_checksum_v4(
         &self,
         source_addr: &Ipv4Addr,
@@ -55,7 +56,7 @@ impl UdpHeader {
         checksum.add_bytes(self.destination_port.to_be_bytes().as_ref());
         checksum.add_bytes(self.length.to_be_bytes().as_ref());
         checksum.add_bytes(&[0x00, 0x00]); // checksum placeholder
-        checksum.add_bytes(data.as_ref());
+        checksum.add_bytes(data[..self.length as usize - Self::LENGTH].as_ref());
 
         let checksum = checksum.checksum();
         // RFC 768: If the computed checksum is 0, it is transmitted as all ones.
@@ -66,6 +67,7 @@ impl UdpHeader {
         }
     }
 
+    #[must_use]
     pub fn validate_checksum_v4(
         &self,
         source_addr: &Ipv4Addr,
@@ -84,15 +86,18 @@ impl UdpHeader {
         self.checksum = self.compute_checksum_v4(source_addr, destination_addr, data);
     }
 
-    pub fn payload_length(&self) -> usize {
+    #[must_use]
+    pub const fn datagram_length(&self) -> usize {
         self.length as usize
     }
 
-    pub fn destination_port(&self) -> u16 {
+    #[must_use]
+    pub const fn destination_port(&self) -> u16 {
         self.destination_port
     }
 
-    pub fn source_port(&self) -> u16 {
+    #[must_use]
+    pub const fn source_port(&self) -> u16 {
         self.source_port
     }
 }

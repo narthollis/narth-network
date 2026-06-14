@@ -317,7 +317,7 @@ pub struct IPv4Header {
 }
 
 impl IPv4Header {
-    pub const MIN_LENGTH: usize = 20;
+    pub const LENGTH_NO_OPTIONS: usize = 20;
 
     #[must_use]
     pub fn new(
@@ -400,11 +400,11 @@ impl IPv4Header {
         self.fragment_details.more_fragments || self.fragment_details.offset > 0
     }
 
-    pub const fn source_address(&self) -> &Ipv4Addr {
-        &self.source_address
+    pub const fn source_address(&self) -> Ipv4Addr {
+        self.source_address
     }
-    pub const fn destination_address(&self) -> &Ipv4Addr {
-        &self.destination_address
+    pub const fn destination_address(&self) -> Ipv4Addr {
+        self.destination_address
     }
 
     pub const fn payload_length(&self) -> usize {

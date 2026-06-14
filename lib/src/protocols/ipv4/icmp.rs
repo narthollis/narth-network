@@ -1,6 +1,5 @@
 use crate::common::err_as_eof;
 use crate::protocols::ipv4::IPv4Header;
-use crate::write_to_buffer;
 use crate::write_to_buffer::WriteToBuffer;
 use std::fmt::{Debug, Formatter};
 use std::net::Ipv4Addr;
@@ -233,28 +232,36 @@ impl WriteToBuffer for EchoMessageDataUnix {
 
     fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
         buffer.put_u64_ne(self.since_epoc.as_secs());
-        buffer.put_u64_ne(self.since_epoc.subsec_micros() as u64);
+        buffer.put_u64_ne(self.since_epoc.subsec_micros().into());
 
-        let mut pad_len = 56 - 16;
+        let mut pad_len = 16;
 
         if let Some(monotonic_instant) = self.monotonic_instant {
             buffer.put_u128_ne(monotonic_instant.as_nanos());
 
             // And we now need to pad 16 fewer bytes
-            pad_len -= 16;
+            pad_len += 16;
         }
 
         buffer.put_slice(Self::EMPTY[pad_len..].as_ref());
     }
 }
 
+impl EchoMessageDataUnix {
+    fn add_to_checksum(&self, checksum: &mut internet_checksum::Checksum) {
+        let mut b = [0u8; Self::LENGTH];
+        self.write_to_buffer(&mut b[..]);
+        checksum.add_bytes(&b[..]);
+    }
+}
+
 impl TryFrom<&bytes::Bytes> for EchoMessageDataUnix {
     type Error = std::io::Error;
 
-    /// Try and get Unix-like ping data (with the addition of our monotomic timer)
-    /// But this has a very high chance of just returning junk
-    /// As far as I have been able to tell there aren't any real markers
-    /// So we should probably only call this on EchoReply's that we have already matched
+    /// Try and get Unix-like ping data (with the addition of our monatomic timer).
+    /// But this has a very high chance of just returning junk.
+    /// As far as I have been able to tell there aren't any real markers,
+    /// so we should only call this on EchoReply's that we have already matched.
     fn try_from(value: &bytes::Bytes) -> Result<Self, Self::Error> {
         if value.len() < Self::LENGTH {
             return std::io::Result::Err(std::io::Error::new(
@@ -332,10 +339,105 @@ pub enum ICMPMessageTypes {
     DestinationUnreachable(DestinationUnreachableMessage),
     SourceQuench(bytes::Bytes),
     Redirect(RedirectMessage),
-    Echo(EchoMessage),
+    EchoRequest(EchoMessage),
     TimeExceeded(TimeExceededMessage),
     ParameterProblem(ParameterProblemMessage),
     // TODO the rest
+}
+
+impl ICMPMessageTypes {
+    pub fn encoded_length(&self) -> usize {
+        match &self {
+            Self::EchoReply(m) | Self::EchoRequest(m) => {
+                2 // Identifier
+                    + 2 // Sequence
+                    + match &m.data {
+                    EchoMessageData::Bytes(b) => b.len(),
+                    EchoMessageData::UnixLike(d) => d.encoded_length(),
+                }
+            }
+            Self::DestinationUnreachable(m) => {
+                4 // Reserved
+                    + m.ipv4header.encoded_length()
+                    + m.datagram.len()
+            }
+            Self::SourceQuench(m) => {
+                4 // Reserved
+                    + m.as_ref().len()
+            }
+            // 4=gateway address + data length
+            Self::Redirect(m) => {
+                4 // Reserved
+                    + m.data.as_ref().len()
+            }
+            // 4=reserved + data length
+            Self::TimeExceeded(m) => {
+                4 // Reserved
+                    + m.data.as_ref().len()
+            }
+            Self::ParameterProblem(m) => {
+                1 // Pointer
+                    + 3 // Reserved
+                    + m.data.as_ref().len()
+            }
+        }
+    }
+
+    pub fn type_and_code(&self) -> (u8, u8) {
+        match &self {
+            Self::EchoReply(_) => (0u8, 0u8),
+            Self::DestinationUnreachable(m) => (3u8, m.code.into()),
+            Self::SourceQuench(_) => (4u8, 0u8),
+            Self::Redirect(m) => (5u8, m.code.into()),
+            Self::EchoRequest(_) => (8u8, 0u8),
+            Self::TimeExceeded(m) => (11u8, m.code.into()),
+            Self::ParameterProblem(_) => (12u8, 0u8),
+        }
+    }
+
+    pub fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
+        match self {
+            Self::EchoRequest(m) | Self::EchoReply(m) => {
+                buffer.put_u16(m.identifier);
+                buffer.put_u16(m.sequence_number);
+                match &m.data {
+                    EchoMessageData::Bytes(b) => buffer.put_slice(b),
+                    EchoMessageData::UnixLike(d) => d.write_to_buffer(&mut buffer),
+                }
+            }
+            Self::DestinationUnreachable(m) => {
+                m.ipv4header.write_to_buffer(&mut buffer);
+                buffer.put_slice(&m.datagram);
+            }
+            Self::SourceQuench(data) => buffer.put_slice(data.as_ref()),
+            Self::Redirect(m) => buffer.put_slice(m.data.as_ref()),
+            Self::TimeExceeded(m) => buffer.put_slice(m.data.as_ref()),
+            Self::ParameterProblem(m) => buffer.put_slice(m.data.as_ref()),
+        };
+    }
+
+    pub fn add_to_checksum(&self, checksum: &mut internet_checksum::Checksum) {
+        match self {
+            Self::EchoReply(e) | Self::EchoRequest(e) => {
+                checksum.add_bytes(e.identifier.to_be_bytes().as_ref());
+                checksum.add_bytes(e.sequence_number.to_be_bytes().as_ref());
+                match &e.data {
+                    EchoMessageData::Bytes(b) => checksum.add_bytes(b),
+                    EchoMessageData::UnixLike(d) => d.add_to_checksum(checksum),
+                }
+            }
+            Self::DestinationUnreachable(m) => {
+                let mut b = vec![0u8; m.ipv4header.encoded_length()];
+                m.ipv4header.write_to_buffer(&mut b);
+                checksum.add_bytes(b.as_slice());
+                checksum.add_bytes(m.datagram.as_ref());
+            }
+            Self::SourceQuench(m) => checksum.add_bytes(m),
+            Self::Redirect(m) => checksum.add_bytes(m.data.as_ref()),
+            Self::TimeExceeded(m) => checksum.add_bytes(m.data.as_ref()),
+            Self::ParameterProblem(m) => checksum.add_bytes(m.data.as_ref()),
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -349,7 +451,7 @@ impl ICMPMessage {
     pub fn new_echo_request(identifier: u16, sequence: u16) -> Self {
         Self {
             checksum: [0, 0],
-            message: ICMPMessageTypes::Echo(EchoMessage {
+            message: ICMPMessageTypes::EchoRequest(EchoMessage {
                 identifier,
                 sequence_number: sequence,
                 data: EchoMessageData::UnixLike(EchoMessageDataUnix::default()),
@@ -405,7 +507,7 @@ impl ICMPMessage {
                 ),
                 data: bytes.slice(8..),
             })),
-            8 => Ok(Echo(bytes.try_into()?)),
+            8 => Ok(EchoRequest(bytes.try_into()?)),
             11 => Ok(TimeExceeded(TimeExceededMessage {
                 code: code.try_into()?,
                 data: bytes.slice(8..),
@@ -423,105 +525,41 @@ impl ICMPMessage {
         Ok(Self { checksum, message })
     }
 
-    fn type_and_code_u8(&self) -> (u8, u8) {
-        #[allow(clippy::enum_glob_use)]
-        use ICMPMessageTypes::*;
-        match &self.message {
-            EchoReply(_) => (0u8, 0u8),
-            DestinationUnreachable(m) => (3u8, m.code.into()),
-            SourceQuench(_) => (4u8, 0u8),
-            Redirect(m) => (5u8, m.code.into()),
-            Echo(_) => (8u8, 0u8),
-            TimeExceeded(m) => (11u8, m.code.into()),
-            ParameterProblem(_) => (12u8, 0u8),
-        }
+    pub fn compute_checksum(&self) -> [u8; 2] {
+        let mut checksum = internet_checksum::Checksum::new();
+
+        let (t, c) = self.message.type_and_code();
+
+        checksum.add_bytes(&[t, c]);
+        checksum.add_bytes(&[0u8, 0u8]); // Write empty checksum placeholder
+        self.message.add_to_checksum(&mut checksum);
+
+        checksum.checksum()
+    }
+
+    pub fn compute_checksum_and_update(&mut self) {
+        self.checksum = self.compute_checksum();
     }
 }
 
-impl write_to_buffer::WriteToBuffer for ICMPMessage {
+impl WriteToBuffer for ICMPMessage {
     fn encoded_length(&self) -> usize {
-        #[allow(clippy::enum_glob_use)]
-        use ICMPMessageTypes::*;
-
         1 // Type
             + 1 // Code
             + 2 // Checksum
-            + match &self.message {
-            EchoReply(m) | Echo(m) => {
-                2 // Identifier
-                    + 2 // Sequence
-                    + match &m.data {
-                    EchoMessageData::Bytes(b) => b.len(),
-                    EchoMessageData::UnixLike(d) => d.encoded_length(),
-                }
-            }
-            DestinationUnreachable(m) => {
-                4 // Reserved
-                    + m.ipv4header.encoded_length()
-                    + m.datagram.len()
-            }
-            SourceQuench(m) => {
-                4 // Reserved
-                    + m.as_ref().len()
-            }
-            // 4=gateway address + data length
-            Redirect(m) => {
-                4 // Reserved
-                    + m.data.as_ref().len()
-            }
-            // 4=reserved + data length
-            TimeExceeded(m) => {
-                4 // Reserved
-                    + m.data.as_ref().len()
-            }
-            ParameterProblem(m) => {
-                1 // Pointer
-                    + 3 // Reserved
-                    + m.data.as_ref().len()
-            }
-        }
+            + self.message.encoded_length()
     }
 
     fn write_to_buffer<Buf: bytes::BufMut>(&self, mut buffer: Buf) {
-        use ICMPMessageTypes::*;
-        use bytes::BufMut;
+        let (icmp_type, code) = self.message.type_and_code();
 
-        let mut packet = bytes::BytesMut::with_capacity(self.encoded_length());
+        buffer.put_u8(icmp_type);
+        buffer.put_u8(code);
 
-        let (icmp_type, code) = self.type_and_code_u8();
+        // Checksum placeholder - we actually need to rework this so that checksum is computed before write
+        buffer.put_slice(self.checksum.as_ref());
 
-        packet.put_u8(icmp_type);
-        packet.put_u8(code);
-
-        packet.put_u16(0x0000);
-
-        match &self.message {
-            Echo(m) | EchoReply(m) => {
-                packet.put_u16(m.identifier);
-                packet.put_u16(m.sequence_number);
-                match &m.data {
-                    EchoMessageData::Bytes(b) => packet.put_slice(b),
-                    EchoMessageData::UnixLike(d) => d.write_to_buffer(&mut packet),
-                }
-            }
-            DestinationUnreachable(m) => {
-                m.ipv4header.write_to_buffer(&mut packet);
-                packet.put_slice(&m.datagram);
-            }
-            SourceQuench(data) => packet.put_slice(data.as_ref()),
-            Redirect(m) => packet.put_slice(m.data.as_ref()),
-            TimeExceeded(m) => packet.put_slice(m.data.as_ref()),
-            ParameterProblem(m) => packet.put_slice(m.data.as_ref()),
-        };
-
-        let mut checksum = internet_checksum::Checksum::new();
-        checksum.add_bytes(&packet);
-        let checksum = checksum.checksum();
-
-        packet[2] = checksum[0];
-        packet[3] = checksum[1];
-
-        buffer.put_slice(&packet);
+        self.message.write_to_buffer(&mut buffer);
     }
 }
 
@@ -529,7 +567,7 @@ impl Debug for ICMPMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         use ICMPMessageTypes::*;
 
-        let (icmp_type, code) = self.type_and_code_u8();
+        let (icmp_type, code) = self.message.type_and_code();
 
         let mut d = f.debug_struct("ICMPMessage");
         d.field("type", &icmp_type);
@@ -546,7 +584,7 @@ impl Debug for ICMPMessage {
         );
 
         match &self.message {
-            Echo(m) | EchoReply(m) => {
+            EchoRequest(m) | EchoReply(m) => {
                 d.field("identifier", &m.identifier)
                     .field("sequence_number", &m.sequence_number)
                     .field(
