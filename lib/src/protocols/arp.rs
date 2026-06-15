@@ -6,8 +6,9 @@ use std::io::{Error, ErrorKind};
 use std::net::Ipv4Addr;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[repr(u8)]
 pub enum HardwareType {
-    Ethernet,
+    Ethernet = 1,
     Other(u16),
 }
 impl From<[u8; 2]> for HardwareType {

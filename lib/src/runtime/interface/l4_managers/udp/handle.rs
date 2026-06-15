@@ -43,7 +43,7 @@ impl Debug for UdpSocketHandle {
 }
 
 impl UdpSocketHandle {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         recv_tx: ringbuf::HeapProd<UdpRecvMessage>,
         send_rx: ringbuf::HeapCons<UdpSendMessage>,
         local_addr: SocketAddr,

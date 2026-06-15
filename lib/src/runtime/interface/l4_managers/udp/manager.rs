@@ -2,7 +2,6 @@ use crate::protocols::ipv4::IPv4Header;
 use crate::protocols::udp::UdpHeader;
 use crate::ready_by_bits::IterReadyByBits;
 use crate::runtime::UdpSocket;
-use crate::runtime::buffer_pool::BufferPool;
 use crate::runtime::interface::InterfaceContext;
 use crate::runtime::interface::l4_managers::udp::handle::UdpSocketHandle;
 use crate::runtime::interface::l4_managers::udp::messages::{

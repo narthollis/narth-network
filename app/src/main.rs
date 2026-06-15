@@ -5,6 +5,7 @@ use narth_net::runtime::network::Network;
 use std::io::{Write, stdout};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, RawFd};
+use std::thread;
 use std::time::Duration;
 use tun_rs::SyncDevice;
 
@@ -66,15 +67,21 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_secs(10));
     }
 
-    print!("Trying to add IPv4 address ({})...", IPV4_OURS);
-    _ = stdout().flush();
-    match interface.ipv4_address_add(IPV4_OURS, IPV4_NETWORK_PREFIX) {
-        Ok(_) => println!(" Added"),
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            return Err(std::io::Error::other(e).into());
-        }
-    }
+    println!("using dhcpv4 to get address...");
+    let mut dhcp = narth_net::services::DHCPv4Client::new(interface.clone());
+
+    thread::spawn(move || dhcp.run());
+
+    //
+    // print!("Trying to add IPv4 address ({})...", IPV4_OURS);
+    // _ = stdout().flush();
+    // match interface.ipv4_address_add(IPV4_OURS, IPV4_NETWORK_PREFIX) {
+    //     Ok(_) => println!(" Added"),
+    //     Err(e) => {
+    //         eprintln!("Error: {}", e);
+    //         return Err(std::io::Error::other(e).into());
+    //     }
+    // }
 
     match interface.ipv4_route_add(
         Ipv4Addr::UNSPECIFIED,

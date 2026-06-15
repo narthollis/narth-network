@@ -96,7 +96,7 @@ pub(crate) enum InterfaceControlMessage {
     BindUdp(std::net::SocketAddr, IoResultSender<UdpSocket>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Interface {
     control_tx: mpsc::SyncSender<InterfaceControlMessage>,
     ipv4_addresses: Arc<RwLock<Vec<(Ipv4Addr, Ipv4Addr)>>>,

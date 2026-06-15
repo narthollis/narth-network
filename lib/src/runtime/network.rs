@@ -224,7 +224,7 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
     //         .collect())
     // }
 
-    pub fn add_interface(&mut self, mac_addr: MacAddr) -> Result<std::sync::Arc<Interface>> {
+    pub fn add_interface(&mut self, mac_addr: MacAddr) -> Result<Interface> {
         use ringbuf::traits::Split;
 
         if self.mac_addresses().contains(&mac_addr) {
@@ -249,7 +249,6 @@ impl<T: NetworkBridge + std::os::fd::AsRawFd> Network<T> {
             ),
             recv_consumer,
         );
-        let interface = std::sync::Arc::new(interface);
 
         let mut handle = InterfaceHandle {
             receiver: recv_producer,
