@@ -293,8 +293,14 @@ impl ReadyState {
     }
 }
 
+#[derive(Debug)]
+pub struct ReadyEvent {
+    pub token: Rc<Token>,
+    pub state: ReadyState,
+}
+
 impl Iterator for ReadyTokensByBits<'_> {
-    type Item = (Rc<Token>, ReadyState);
+    type Item = ReadyEvent;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if self.current_chunk >= self.ready_bits.len() {
@@ -339,7 +345,7 @@ impl Iterator for ReadyTokensByBits<'_> {
             if let Some(Some(item)) = self.items.get(absolute_index)
                 && let Some(item) = item.token.upgrade()
             {
-                return Some((item, state));
+                return Some(ReadyEvent { token: item, state });
             }
         }
     }

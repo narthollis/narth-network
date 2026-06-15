@@ -3,6 +3,7 @@ use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
 use crate::protocols::udp::UdpHeader;
 use crate::ready_by_bits::IterReadyByBits;
 use crate::runtime::buffer_pool::{BufferPool, WriteTrackingBuffer};
+use crate::runtime::emsgsize::errmsgsize;
 use crate::runtime::interface::l3_ipv4::IPv4Handler;
 use crate::runtime::interface::{InterfaceContext, SendError, SendResult};
 use crate::write_to_buffer::WriteToBuffer;
@@ -686,6 +687,10 @@ impl UdpSocket {
     ///
     /// [see std implementation](std::net::UdpSocket::send_to)
     pub fn send_to<A: ToSocketAddrs>(&mut self, buf: &[u8], addr: A) -> Result<usize> {
+        if buf.len() > self.shared_state.max_payload_size.load(Ordering::Acquire) {
+            return Err(errmsgsize());
+        }
+
         let non_blocking = self.load_non_blocking_and_check_errors()?;
 
         trace!("send_to {non_blocking:?}");
@@ -816,11 +821,7 @@ impl UdpSocket {
     pub fn send(&mut self, buf: &[u8]) -> Result<usize> {
         let peer = self.peer_addr()?;
 
-        if self.shared_state.is_nonblocking.load(Ordering::Acquire) {
-            self.context.send_inner(buf, peer, false)
-        } else {
-            self.send_to_blocking(buf, peer)
-        }
+        self.send_to(buf, peer)
     }
 
     /// Receives a single datagram message on the socket from the remote address to

@@ -37,6 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+//noinspection D
 fn s_main() -> Result<(), Box<dyn std::error::Error>> {
     // tracing_subscriber::registry()
     //     .with(fmt::layer().pretty())
@@ -139,18 +140,42 @@ fn s_main() -> Result<(), Box<dyn std::error::Error>> {
     // ping(&interface, [1, 1, 1, 1].into(), 4);
 
     let mut udp = interface.bind_udp("0.0.0.0:12345")?;
+    udp.set_nonblocking(false)?;
+    let mut poller = Poller::default();
+    let token = poller.register(&mut udp)?;
     loop {
-        let mut buff = vec![0u8; MTU as usize];
-        match udp.recv_from(&mut buff) {
-            Ok((s, addr)) => {
-                println!("Received: {}", String::from_utf8_lossy(&buff[0..s]));
-                udp.send_to(&buff[..s], addr)?;
-            }
-            Err(err) => {
-                println!("UDP recv error: {}", err);
+        let ready = poller.poll();
+        for event in ready {
+            if event.token == token {
+                loop {
+                    let mut buf = [0u8; 1500];
+                    match udp.recv_from(&mut buf) {
+                        Ok((count, addr)) => {
+                            println!("Received {} bytes from {}", count, addr);
+                            udp.send_to(&buf[..count], addr)?;
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            break;
+                        }
+                        Err(e) => println!("UDP recv error: {}", e),
+                    }
+                }
             }
         }
     }
+
+    // loop {
+    //     let mut buff = vec![0u8; MTU as usize];
+    //     match udp.recv_from(&mut buff) {
+    //         Ok((s, addr)) => {
+    //             println!("Received: {}", String::from_utf8_lossy(&buff[0..s]));
+    //             udp.send_to(&buff[..s], addr)?;
+    //         }
+    //         Err(err) => {
+    //             println!("UDP recv error: {}", err);
+    //         }
+    //     }
+    // }
 
     jh.join().expect("Failed to join network thread");
 

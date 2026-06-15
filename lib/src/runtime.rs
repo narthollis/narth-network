@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 mod address_table;
 pub(in crate::runtime) mod buffer_pool;
 pub(in crate::runtime) mod channel;
+mod emsgsize;
 pub mod interface;
 pub mod network;
 mod route_table;
