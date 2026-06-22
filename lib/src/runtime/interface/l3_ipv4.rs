@@ -10,6 +10,16 @@ use tracing::{debug, info, trace, trace_span};
 pub(super) struct IPv4Handler {}
 
 impl IPv4Handler {
+    fn is_addr_acceptable(ctx: &InterfaceContext, addr: &Ipv4Addr) -> bool {
+        if addr.is_broadcast() {
+            true
+        } else if addr.is_multicast() {
+            ctx.ipv4_addresses.contains_ephemeral_multicast(&addr)
+        } else {
+            ctx.ipv4_addresses.contains_as_address_or_broadcast(addr)
+        }
+    }
+
     pub fn recv(ctx: &mut InterfaceContext, managers: &mut Managers, bytes: &bytes::Bytes) {
         let ip = match IPv4Header::from_bytes(&bytes) {
             Ok(ip) => ip,
@@ -21,6 +31,9 @@ impl IPv4Handler {
         if ip.is_fragmented() {
             trace!("dropping fragmented IPv4");
             return;
+        }
+        if !Self::is_addr_acceptable(ctx, &ip.destination_address()) {
+            return; // drop
         }
 
         let payload = &bytes.slice(ip.encoded_length()..ip.total_length());

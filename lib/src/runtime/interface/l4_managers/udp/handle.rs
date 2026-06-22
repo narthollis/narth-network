@@ -26,6 +26,7 @@ pub(super) struct UdpSocketHandle {
 
     pub read_wake_handle: Option<ReadWakeHandle>,
     pub write_wake_handle: Option<WakeHandle>,
+    pub allow_reuse: bool,
 }
 
 impl Debug for UdpSocketHandle {
@@ -57,6 +58,7 @@ impl UdpSocketHandle {
             shared_state,
             read_wake_handle: None,
             write_wake_handle: None,
+            allow_reuse: false,
         }
     }
 

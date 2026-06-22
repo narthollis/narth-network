@@ -2,6 +2,7 @@ mod context;
 mod handle;
 pub mod manager;
 mod messages;
+mod port_binding;
 
 use crate::poller::{PollerReadRegister, PollerWriteRegister, WakeHandle};
 use crate::runtime::emsgsize::errmsgsize;

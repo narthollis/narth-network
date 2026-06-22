@@ -7,10 +7,10 @@ use crate::runtime::interface::l4_managers::udp::handle::UdpSocketHandle;
 use crate::runtime::interface::l4_managers::udp::messages::{
     DrainSendAction, SharableUdpSendResult, UdpRecvMessage, UdpSendMessage,
 };
+use crate::runtime::interface::l4_managers::udp::port_binding::PortBindings;
 use crate::runtime::interface::l4_managers::udp::{UdpSocketContext, UdpSocketSharedState};
 use crate::write_to_buffer::WriteToBuffer;
 use ringbuf::traits::{Producer, Split};
-use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -19,7 +19,7 @@ use tracing::{trace, trace_span, warn};
 
 #[derive(Debug)]
 pub struct UdpManager {
-    sockets: HashMap<SocketAddr, UdpSocketHandle>,
+    sockets: PortBindings,
     ready_bits: Arc<[AtomicU64; 16]>,
     socket_ids: Box<[Option<SocketAddr>; u64::BITS as usize * 16]>,
 }
@@ -27,7 +27,7 @@ pub struct UdpManager {
 impl Default for UdpManager {
     fn default() -> Self {
         Self {
-            sockets: HashMap::default(),
+            sockets: PortBindings::default(),
             ready_bits: Arc::default(),
             socket_ids: vec![Option::<SocketAddr>::None; u64::BITS as usize * 16]
                 .into_boxed_slice()
@@ -38,6 +38,8 @@ impl Default for UdpManager {
 }
 
 impl UdpManager {
+    const MAX_EPHEMERAL_PORT_ATTEMPTS: usize = 128;
+
     pub fn bind(&mut self, ctx: &InterfaceContext, addr: SocketAddr) -> std::io::Result<UdpSocket> {
         if !addr.is_ipv4() {
             // For now reject any IPv6 stuff because we haven't implemented it
@@ -47,18 +49,27 @@ impl UdpManager {
             ));
         }
 
-        if self.sockets.contains_key(&addr) {
+        let addr = if addr.port() == 0 {
+            let mut attempts = 0;
+            loop {
+                let port = fastrand::u16(ctx.ephemeral_ports.clone());
+                let proposed = SocketAddr::new(addr.ip(), port);
+                if self.sockets.is_bindable(&proposed, false, true) {
+                    break proposed;
+                }
+                attempts += 1;
+                if attempts >= Self::MAX_EPHEMERAL_PORT_ATTEMPTS {
+                    return Err(Error::new(
+                        ErrorKind::AddrInUse,
+                        "ephemeral ports exhausted",
+                    ));
+                }
+            }
+        } else if !self.sockets.is_bindable(&addr, false, true) {
             return Err(Error::new(ErrorKind::AddrInUse, "address already in use"));
-        }
-
-        if addr.ip().is_unspecified() && self.sockets.keys().any(|x| x.port() == addr.port())
-            || self
-                .sockets
-                .keys()
-                .any(|x| x.ip().is_unspecified() && x.port() == addr.port())
-        {
-            return Err(Error::new(ErrorKind::AddrInUse, "address already in use"));
-        }
+        } else {
+            addr
+        };
 
         let (recv_tx, recv_rx) = ringbuf::HeapRb::<UdpRecvMessage>::new(1024).split();
         let (send_tx, send_rx) = ringbuf::HeapRb::<UdpSendMessage>::new(1024).split();
@@ -109,7 +120,7 @@ impl UdpManager {
             shared_state,
         };
 
-        self.sockets.insert(addr, handle);
+        self.sockets.insert(addr, handle, true);
 
         println!("bound {:?}", addr);
 

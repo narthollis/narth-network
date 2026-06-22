@@ -1,6 +1,6 @@
 use crate::protocols::ethernet::mac::MacAddr;
 use crate::protocols::ipv4::prefix_to_mask;
-use crate::runtime::address_table::AddressTable;
+use crate::runtime::address_table::AddressTableIpv4;
 use crate::runtime::interface::context::InterfaceContext;
 use crate::runtime::interface::l2_ethernet::{ArpState, ArpTable};
 use crate::runtime::interface::l4_managers::Managers;
@@ -43,9 +43,10 @@ impl InterfaceWorker {
 
                 network_tx,
                 arp_table: ArpTable::default(),
-                ipv4_addresses: AddressTable::default(),
+                ipv4_addresses: AddressTableIpv4::default(),
                 ipv4_route_table: RouteTable::default(),
                 ipv4_send_buffer: HashMap::default(),
+                ephemeral_ports: 49152u16..65535u16,
             },
             managers: Managers::default(),
         }

@@ -3,7 +3,7 @@ use crate::protocols::ethernet::mac::MacAddr;
 use crate::protocols::ethernet::{EtherType, EthernetHeader};
 use crate::protocols::ipv4::icmp::ICMPMessage;
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
-use crate::runtime::address_table::AddressTable;
+use crate::runtime::address_table::AddressTableIpv4;
 use crate::runtime::channel::{NetworkSender, NetworkSenderError};
 use crate::runtime::interface::l2_ethernet::ArpTable;
 use crate::runtime::interface::{SendError, SendResult};
@@ -21,9 +21,11 @@ pub struct InterfaceContext {
     pub(super) network_tx: NetworkSender,
 
     pub(super) arp_table: ArpTable,
-    pub(super) ipv4_addresses: AddressTable<Ipv4Addr>,
+    pub(super) ipv4_addresses: AddressTableIpv4,
     pub(super) ipv4_route_table: RouteTable<Ipv4Addr>,
     pub(super) ipv4_send_buffer: HashMap<Ipv4Addr, VecDeque<(IPv4Header, bytes::Bytes)>>,
+
+    pub(super) ephemeral_ports: std::ops::Range<u16>,
 }
 
 impl InterfaceContext {
