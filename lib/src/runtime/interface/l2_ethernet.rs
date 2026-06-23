@@ -144,7 +144,7 @@ impl EthernetHandler {
             .arp_table
             .update_only(arp.source_mac(), arp.source_addr());
 
-        if ctx.ipv4_addresses.contains(&arp.target_addr()) {
+        if ctx.ipv4_addresses.contains(arp.target_addr()) {
             if !merged {
                 ctx.arp_table
                     .update_or_insert(arp.source_mac(), arp.source_addr());

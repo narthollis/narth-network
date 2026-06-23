@@ -46,32 +46,32 @@ impl AddressTableIpv4 {
         self.update();
     }
 
-    pub fn remove(&mut self, value: &Ipv4Addr) {
-        if let Some(position) = self.local.iter().position(|a| a.address == *value) {
+    pub fn remove(&mut self, value: Ipv4Addr) {
+        if let Some(position) = self.local.iter().position(|a| a.address == value) {
             self.local.remove(position);
         }
         self.update();
     }
 
-    pub fn contains(&self, value: &Ipv4Addr) -> bool {
-        self.local.iter().any(|a| a.address == *value)
+    pub fn contains(&self, value: Ipv4Addr) -> bool {
+        self.local.iter().any(|a| a.address == value)
     }
-    pub fn contains_as_address_or_broadcast(&self, value: &Ipv4Addr) -> bool {
+    pub fn contains_as_address_or_broadcast(&self, value: Ipv4Addr) -> bool {
         self.local
             .iter()
-            .any(|a| a.address == *value || a.broadcast == *value)
+            .any(|a| a.address == value || a.broadcast == value)
     }
 
-    pub fn contains_ephemeral_multicast(&self, value: &Ipv4Addr) -> bool {
+    pub fn contains_ephemeral_multicast(&self, value: Ipv4Addr) -> bool {
         // TODO implement me
         false
     }
 
     /// Find the first assigned address whose subnet contains value
-    pub fn first_with_subnet_containing(&self, value: &Ipv4Addr) -> Option<Ipv4Addr> {
+    pub fn first_with_subnet_containing(&self, value: Ipv4Addr) -> Option<Ipv4Addr> {
         self.local
             .iter()
-            .find(|a| *value & a.mask == a.network)
+            .find(|a| value & a.mask == a.network)
             .map(|a| a.address)
     }
 }

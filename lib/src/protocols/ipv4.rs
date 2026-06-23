@@ -1,4 +1,4 @@
-mod dhcp;
+pub mod dhcp;
 pub mod icmp;
 
 use crate::write_to_buffer::WriteToBuffer;

@@ -6,6 +6,8 @@ pub struct MacAddr(u8, u8, u8, u8, u8, u8);
 pub const BROADCAST: MacAddr = MacAddr(255, 255, 255, 255, 255, 255);
 
 impl MacAddr {
+    pub const LENGTH: usize = 6;
+
     #[must_use]
     #[allow(clippy::many_single_char_names)]
     pub const fn new(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8) -> Self {

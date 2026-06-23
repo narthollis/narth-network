@@ -198,7 +198,7 @@ impl InterfaceWorker {
         self.context
             .ipv4_route_table
             .remove_matching(|x| x.source == addr);
-        self.context.ipv4_addresses.remove(&addr);
+        self.context.ipv4_addresses.remove(addr);
     }
 
     fn handle_ipv4_route_add(
@@ -212,11 +212,11 @@ impl InterfaceWorker {
             .or_else(|| {
                 self.context
                     .ipv4_addresses
-                    .first_with_subnet_containing(&next_hop)
+                    .first_with_subnet_containing(next_hop)
             })
             .ok_or(Error::RouteNextHopUnreachable())
             .and_then(|src| {
-                if self.context.ipv4_addresses.contains(&src) {
+                if self.context.ipv4_addresses.contains(src) {
                     Ok(src)
                 } else {
                     Err(Error::RouteUnknownSource())

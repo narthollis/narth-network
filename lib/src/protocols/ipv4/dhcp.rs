@@ -1,7 +1,11 @@
 use crate::common::err_as_eof;
 use crate::protocols::arp::HardwareType;
 use crate::protocols::ethernet::mac::MacAddr;
+use crate::write_to_buffer::WriteToBuffer;
+use bytes::BufMut;
 use std::net::Ipv4Addr;
+use std::time;
+use strum::{EnumDiscriminants, FromRepr};
 use tracing::debug;
 
 #[derive(Debug, Copy, Clone)]
@@ -22,6 +26,7 @@ enum Operation {
 /// MBZ:  MUST BE ZERO (reserved for future use)
 ///
 /// Figure 2:  Format of the 'flags' field
+#[derive(Debug, Copy, Clone)]
 struct Flags {
     broadcast: bool,
 }
@@ -40,7 +45,7 @@ impl TryFrom<[u8; 2]> for Flags {
             }
         };
 
-        Ok(Flags { broadcast })
+        Ok(Self { broadcast })
     }
 }
 
@@ -74,18 +79,23 @@ pub enum DHCPMessageType {
 }
 
 /// RFC1533
+///
+/// ```test
 /// 0                   1                   2                   3
 /// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 /// |      tag(1)       |      length(1)    | data(variable)        |
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
 // The pad option can be used to cause subsequent fields to align on word boundaries.
 // The code for the pad option is 0, and its length is 1 octet.
 
 // The end option marks the end of valid information in the vendor field. Subsequent octets
 // should be filled with pad options. The code for the end option is 255, and its length is
 // 1 octet.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, EnumDiscriminants)]
+#[strum_discriminants(derive(FromRepr), name(OptionCode))]
+#[repr(u8)]
 pub enum DHCPOption {
     /// The subnet mask option specifies the client's subnet mask as per RFC 950.
     /// If both the subnet mask and the router option are specified in a DHCP reply, the subnet
@@ -93,22 +103,26 @@ pub enum DHCPOption {
     ///
     /// The code for the subnet mask option is 1, and its length is 4 octets.
     ///
-    ///     Code   Len        Subnet Mask
-    ///    +-----+-----+-----+-----+-----+-----+
-    ///    |  1  |  4  |  m1 |  m2 |  m3 |  m4 |
-    ///    +-----+-----+-----+-----+-----+-----+
-    SubnetMask(Ipv4Addr),
+    /// ```text
+    /// Code   Len        Subnet Mask
+    /// +-----+-----+-----+-----+-----+-----+
+    /// |  1  |  4  |  m1 |  m2 |  m3 |  m4 |
+    /// +-----+-----+-----+-----+-----+-----+
+    /// ```
+    SubnetMask(Ipv4Addr) = 1,
     /// The time offset field specifies the offset of the client's subnet in
     /// seconds from Coordinated Universal Time (UTC).  The offset is
     /// expressed as a signed 32-bit integer.
     ///
     /// The code for the time offset option is 2, and its length is 4 octets.
     ///
+    /// ```text
     ///  Code   Len        Time Offset
     /// +-----+-----+-----+-----+-----+-----+
     /// |  2  |  4  |  n1 |  n2 |  n3 |  n4 |
     /// +-----+-----+-----+-----+-----+-----+
-    TimeOffset(i32),
+    /// ```
+    TimeOffset(i32) = 2,
     /// The router option specifies a list of IP addresses for routers on the
     /// client's subnet.  Routers SHOULD be listed in order of preference.
     ///
@@ -116,11 +130,13 @@ pub enum DHCPOption {
     /// router option is 4 octets, and the length MUST always be a multiple
     /// of 4.
     ///
+    /// ```text
     ///  Code   Len         Address 1               Address 2
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
     /// |  3  |  n  |  a1 |  a2 |  a3 |  a4 |  a1 |  a2 |  ...
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
-    RouterOption(Vec<Ipv4Addr>),
+    /// ```
+    RouterOption(Vec<Ipv4Addr>) = 3,
     /// (STD 13, RFC 1035 [8]) name servers available to the client.  Servers
     /// SHOULD be listed in order of preference.
     ///
@@ -128,11 +144,13 @@ pub enum DHCPOption {
     /// for this option is 4 octets, and the length MUST always be a multiple
     /// of 4.
     ///
+    /// ```text
     /// Code   Len         Address 1               Address 2
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
     /// |  6  |  n  |  a1 |  a2 |  a3 |  a4 |  a1 |  a2 |  ...
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
-    DomainNameServerOption(Vec<Ipv4Addr>),
+    /// ```
+    DomainNameServerOption(Vec<Ipv4Addr>) = 6,
     /// This option specifies the name of the client.  The name may or may
     /// not be qualified with the local domain name (see section 3.17 for the
     /// preferred way to retrieve the domain name).  See RFC 1035 for
@@ -140,32 +158,38 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 12, and its minimum length is 1.
     ///
+    /// ```text
     /// Code   Len                 Host Name
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
     /// |  12 |  n  |  h1 |  h2 |  h3 |  h4 |  h5 |  h6 |  ...
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
-    HostNameOption(String),
+    /// ```
+    HostNameOption(String) = 12,
     /// This option specifies the domain name that client should use when
     /// resolving hostnames via the Domain Name System.
     ///
     /// The code for this option is 15.  Its minimum length is 1.
     ///
+    /// ```text
     /// Code   Len        Domain Name
     /// +-----+-----+-----+-----+-----+-----+--
     /// |  15 |  n  |  d1 |  d2 |  d3 |  d4 |  ...
     /// +-----+-----+-----+-----+-----+-----+--
-    DomainName(String),
+    /// ```
+    DomainName(String) = 15,
     /// This option specifies the timeout (in seconds) to use when aging Path
     /// MTU values discovered by the mechanism defined in RFC 1191 [12].  The
     /// timeout is specified as a 32-bit unsigned integer.
     ///
     /// The code for this option is 24, and its length is 4.
     ///
+    /// ```text
     /// Code   Len           Timeout
     /// +-----+-----+-----+-----+-----+-----+
     /// |  24 |  4  |  t1 |  t2 |  t3 |  t4 |
     /// +-----+-----+-----+-----+-----+-----+
-    PathMTUAgingTimeoutOption(u32),
+    /// ```
+    PathMTUAgingTimeoutOption(u32) = 24,
     /// This option specifies a table of MTU sizes to use when performing
     /// Path MTU Discovery as defined in RFC 1191.  The table is formatted as
     /// a list of 16-bit unsigned integers, ordered from smallest to largest.
@@ -174,22 +198,26 @@ pub enum DHCPOption {
     /// The code for this option is 25.  Its minimum length is 2, and the
     /// length MUST be a multiple of 2.
     ///
+    /// ```text
     /// Code   Len     Size 1      Size 2
     /// +-----+-----+-----+-----+-----+-----+---
     /// |  25 |  n  |  s1 |  s2 |  s1 |  s2 | ...
     /// +-----+-----+-----+-----+-----+-----+---
-    PathMTUPlateauOption(Vec<u16>),
+    /// ```
+    PathMTUPlateauOption(Vec<u16>) = 25,
     /// This option specifies the broadcast address in use on the client's
     /// subnet.  Legal values for broadcast addresses are specified in
     /// section 3.2.1.3 of [4].
     ///
     /// The code for this option is 28, and its length is 4.
     ///
+    /// ```text
     /// Code   Len     Broadcast Address
     /// +-----+-----+-----+-----+-----+-----+
     /// |  28 |  4  |  b1 |  b2 |  b3 |  b4 |
     /// +-----+-----+-----+-----+-----+-----+
-    BroadcastAddressOption(Ipv4Addr),
+    /// ```
+    BroadcastAddressOption(Ipv4Addr) = 28,
     /// This option specifies a list of static routes that the client should
     /// install in its routing cache.  If multiple routes to the same
     /// destination are specified, they are listed in descending order of
@@ -205,6 +233,7 @@ pub enum DHCPOption {
     /// The code for this option is 33.  The minimum length of this option is
     /// 8, and the length MUST be a multiple of 8.
     ///
+    /// ```text
     ///  Code   Len         Destination 1           Router 1
     /// +-----+-----+-----+-----+-----+-----+-----+-----+-----+-----+
     /// |  33 |  n  |  d1 |  d2 |  d3 |  d4 |  r1 |  r2 |  r3 |  r4 |
@@ -213,7 +242,8 @@ pub enum DHCPOption {
     /// +-----+-----+-----+-----+-----+-----+-----+-----+---
     /// |  d1 |  d2 |  d3 |  d4 |  r1 |  r2 |  r3 |  r4 | ...
     /// +-----+-----+-----+-----+-----+-----+-----+-----+---
-    StaticRouteOption(Vec<(Ipv4Addr, Ipv4Addr)>),
+    /// ```
+    StaticRouteOption(Vec<(Ipv4Addr, Ipv4Addr)>) = 33,
     // TODO maybe want tcp options? need to actually see what of these are passed anyway
     /// This option specifies a list of IP addresses indicating NTP [18]
     /// servers available to the client.  Servers SHOULD be listed in order
@@ -222,21 +252,25 @@ pub enum DHCPOption {
     /// The code for this option is 42.  Its minimum length is 4, and the
     /// length MUST be a multiple of 4.
     ///
+    /// ```text
     /// Code   Len         Address 1               Address 2
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
     /// |  42 |  n  |  a1 |  a2 |  a3 |  a4 |  a1 |  a2 |  ...
     /// +-----+-----+-----+-----+-----+-----+-----+-----+--
-    NetworkTimeProtocolServersOption(Vec<Ipv4Addr>),
+    /// ```
+    NetworkTimeProtocolServersOption(Vec<Ipv4Addr>) = 42,
     /// This option is used in a client request (DHCPDISCOVER) to allow the
     /// client to request that a particular IP address be assigned.
     ///
     /// The code for this option is 50, and its length is 4.
     ///
+    /// ```text
     /// Code   Len          Address
     /// +-----+-----+-----+-----+-----+-----+
     /// |  50 |  4  |  a1 |  a2 |  a3 |  a4 |
     /// +-----+-----+-----+-----+-----+-----+
-    RequestedIpAddress(Ipv4Addr),
+    /// ```
+    RequestedIpAddress(Ipv4Addr) = 50,
     /// This option is used in a client request (DHCPDISCOVER or DHCPREQUEST)
     /// to allow the client to request a lease time for the IP address.  In a
     /// server reply (DHCPOFFER), a DHCP server uses this option to specify
@@ -247,11 +281,13 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 51, and its length is 4.
     ///
+    /// ```text
     /// Code   Len         Lease Time
     /// +-----+-----+-----+-----+-----+-----+
     /// |  51 |  4  |  t1 |  t2 |  t3 |  t4 |
     /// +-----+-----+-----+-----+-----+-----+
-    IPAddressLeaseTime(u32),
+    /// ```
+    IPAddressLeaseTime(u32) = 51,
     /// fields are being overloaded by using them to carry DHCP options. A
     /// DHCP server inserts this option if the returned parameters will
     /// exceed the usual space allotted for options.
@@ -269,11 +305,13 @@ pub enum DHCPOption {
     /// 2     the "sname" field is used to hold options
     /// 3     both fields are used to hold options
     ///
+    /// ```text
     /// Code   Len  Value
     /// +-----+-----+-----+
     /// |  52 |  1  |1/2/3|
     /// +-----+-----+-----+
-    OptionsOverload(OptionsOverload),
+    /// ```
+    OptionsOverload(OptionsOverload) = 52,
     /// This option is used to convey the type of the DHCP message.  The code
     /// for this option is 53, and its length is 1.  Legal values for this
     /// option are:
@@ -288,11 +326,13 @@ pub enum DHCPOption {
     /// 6     DHCPNAK
     /// 7     DHCPRELEASE
     ///
+    /// ```text
     /// Code   Len  Type
     /// +-----+-----+-----+
     /// |  53 |  1  | 1-7 |
     /// +-----+-----+-----+
-    DHCPMessageType(DHCPMessageType),
+    /// ```
+    DHCPMessageType(DHCPMessageType) = 53,
     /// This option is used in DHCPOFFER and DHCPREQUEST messages, and may
     /// optionally be included in the DHCPACK and DHCPNAK messages.  DHCP
     /// servers include this option in the DHCPOFFER in order to allow the
@@ -304,11 +344,13 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 54, and its length is 4.
     ///
+    /// ```text
     /// Code   Len            Address
     /// +-----+-----+-----+-----+-----+-----+
     /// |  54 |  4  |  a1 |  a2 |  a3 |  a4 |
     /// +-----+-----+-----+-----+-----+-----+
-    ServerIdentifier(Ipv4Addr),
+    /// ```
+    ServerIdentifier(Ipv4Addr) = 54,
     /// This option is used by a DHCP client to request values for specified
     /// configuration parameters.  The list of requested parameters is
     /// specified as n octets, where each octet is a valid DHCP option code
@@ -321,11 +363,13 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 55.  Its minimum length is 1.
     ///
+    /// ```text
     /// Code   Len   Option Codes
     /// +-----+-----+-----+-----+---
     /// |  55 |  n  |  c1 |  c2 | ...
     /// +-----+-----+-----+-----+---
-    ParameterRequestList(Vec<u8>),
+    /// ```
+    ParameterRequestList(Vec<u8>) = 55,
     /// This option is used by a DHCP server to provide an error message to a
     /// DHCP client in a DHCPNAK message in the event of a failure. A client
     /// may use this option in a DHCPDECLINE message to indicate the why the
@@ -335,11 +379,13 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 56 and its minimum length is 1.
     ///
+    /// ```text
     /// Code   Len     Text
     /// +-----+-----+-----+-----+---
     /// |  56 |  n  |  c1 |  c2 | ...
     /// +-----+-----+-----+-----+---
-    Message(String),
+    /// ```
+    Message(String) = 56,
     /// This option specifies the maximum length DHCP message that it is
     /// willing to accept.  The length is specified as an unsigned 16-bit
     /// integer.  A client may use the maximum DHCP message size option in
@@ -349,11 +395,13 @@ pub enum DHCPOption {
     /// The code for this option is 57, and its length is 2.  The minimum
     /// legal value is 576 octets.
     ///
+    /// ```text
     /// Code   Len     Length
     /// +-----+-----+-----+-----+
     /// |  57 |  2  |  l1 |  l2 |
     /// +-----+-----+-----+-----+
-    MaximumDHCPMessageSize(u16),
+    /// ```
+    MaximumDHCPMessageSize(u16) = 57,
     /// This option specifies the time interval from address assignment until
     /// the client transitions to the RENEWING state.
     ///
@@ -362,11 +410,13 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 58, and its length is 4.
     ///
+    /// ```text
     /// Code   Len         T1 Interval
     /// +-----+-----+-----+-----+-----+-----+
     /// |  58 |  4  |  t1 |  t2 |  t3 |  t4 |
     /// +-----+-----+-----+-----+-----+-----+
-    RenewalTimeValue(u32),
+    /// ```
+    RenewalTimeValue(u32) = 58,
     /// This option specifies the time interval from address assignment until
     /// the client transitions to the REBINDING state.
     ///
@@ -375,11 +425,13 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 59, and its length is 4.
     ///
+    /// ```text
     /// Code   Len         T2 Interval
     /// +-----+-----+-----+-----+-----+-----+
     /// |  59 |  4  |  t1 |  t2 |  t3 |  t4 |
     /// +-----+-----+-----+-----+-----+-----+
-    RebindingTimeValue(u32),
+    /// ```
+    RebindingTimeValue(u32) = 59,
     /// This option is used by DHCP clients to optionally identify the type
     /// and configuration of a DHCP client.  The information is a string of n
     /// octets, interpreted by servers.  Vendors and sites may choose to
@@ -391,11 +443,13 @@ pub enum DHCPOption {
     ///
     /// The code for this option is 60, and its minimum length is 1.
     ///
+    /// ```text
     /// Code   Len   Class-Identifier
     /// +-----+-----+-----+-----+---
     /// |  60 |  n  |  i1 |  i2 | ...
     /// +-----+-----+-----+-----+---
-    ClassIdentifier(String),
+    /// ```
+    ClassIdentifier(String) = 60,
     /// This option is used by DHCP clients to specify their unique
     /// identifier.  DHCP servers use this value to index their database of
     /// address bindings.  This value is expected to be unique for all
@@ -405,78 +459,246 @@ pub enum DHCPOption {
     ///
     /// It is expected that this field will typically contain a hardware type
     /// and hardware address, but this is not required.  Current legal values
-    /// for hardware types are defined in [https://datatracker.ietf.org/doc/html/rfc1340].
+    /// for hardware types are defined in <https://datatracker.ietf.org/doc/html/rfc1340>.
     ///
     /// The code for this option is 61, and its minimum length is 2.
     ///
+    /// ```text
     /// Code   Len   Type  Client-Identifier
     /// +-----+-----+-----+-----+-----+---
     /// |  61 |  n  |  t1 |  i1 |  i2 | ...
     /// +-----+-----+-----+-----+-----+---
-    ClientIdentifier(MacAddr), // I'm just going to assume this is a Mac Address and drop it otherwise
+    /// ```
+    // I'm just going to assume this is a Mac Address and drop it otherwise
+    ClientIdentifier(MacAddr) = 61,
+    // TODO Implement Option 121 - RFC3442
+}
+
+impl WriteToBuffer for DHCPOption {
+    fn encoded_length(&self) -> usize {
+        #[allow(clippy::match_same_arms)]
+        match self {
+            Self::SubnetMask(_) => 4,
+            Self::TimeOffset(_) => 4,
+            Self::RouterOption(o) => o.len() * 4,
+            Self::DomainNameServerOption(o) => o.len() * 4,
+            Self::HostNameOption(s) => s.len(),
+            Self::DomainName(s) => s.len(),
+            Self::PathMTUAgingTimeoutOption(_) => 4,
+            Self::PathMTUPlateauOption(o) => o.len() * 2,
+            Self::BroadcastAddressOption(_) => 4,
+            Self::StaticRouteOption(o) => o.len() * 8,
+            Self::NetworkTimeProtocolServersOption(o) => o.len() * 4,
+            Self::RequestedIpAddress(_) => 4,
+            Self::IPAddressLeaseTime(_) => 4,
+            Self::OptionsOverload(_) => 1,
+            Self::DHCPMessageType(_) => 1,
+            Self::ServerIdentifier(_) => 4,
+            Self::ParameterRequestList(o) => o.len(),
+            Self::Message(s) => s.len(),
+            Self::MaximumDHCPMessageSize(_) => 2,
+            Self::RenewalTimeValue(_) => 4,
+            Self::RebindingTimeValue(_) => 4,
+            Self::ClassIdentifier(s) => s.len(),
+            Self::ClientIdentifier(_) => 1 + MacAddr::LENGTH,
+        }
+    }
+
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
+        match self {
+            Self::SubnetMask(o) => {
+                buffer.put_u8(OptionCode::SubnetMask as u8);
+                Self::write_ipv4_address(&mut buffer, o);
+            }
+            Self::TimeOffset(o) => {
+                buffer.put_u8(OptionCode::TimeOffset as u8);
+                Self::write_i32(&mut buffer, *o);
+            }
+            Self::RouterOption(o) => {
+                buffer.put_u8(OptionCode::RouterOption as u8);
+                Self::write_vec_ipv4_address(&mut buffer, o);
+            }
+            Self::DomainNameServerOption(o) => {
+                buffer.put_u8(OptionCode::DomainNameServerOption as u8);
+                Self::write_vec_ipv4_address(&mut buffer, o);
+            }
+            Self::HostNameOption(o) => {
+                buffer.put_u8(OptionCode::HostNameOption as u8);
+                Self::write_string(&mut buffer, o);
+            }
+            Self::DomainName(o) => {
+                buffer.put_u8(OptionCode::DomainName as u8);
+                Self::write_string(&mut buffer, o);
+            }
+            Self::PathMTUAgingTimeoutOption(o) => {
+                buffer.put_u8(OptionCode::PathMTUAgingTimeoutOption as u8);
+                Self::write_u32(&mut buffer, *o);
+            }
+            Self::PathMTUPlateauOption(o) => {
+                buffer.put_u8(OptionCode::PathMTUPlateauOption as u8);
+                Self::write_vec_u16(&mut buffer, o);
+            }
+            Self::BroadcastAddressOption(o) => {
+                buffer.put_u8(OptionCode::BroadcastAddressOption as u8);
+                Self::write_ipv4_address(&mut buffer, o);
+            }
+            Self::StaticRouteOption(o) => {
+                buffer.put_u8(OptionCode::StaticRouteOption as u8);
+                Self::write_vec_ipv4_address_tuple(&mut buffer, o);
+            }
+            Self::NetworkTimeProtocolServersOption(o) => {
+                buffer.put_u8(OptionCode::NetworkTimeProtocolServersOption as u8);
+                Self::write_vec_ipv4_address(&mut buffer, o);
+            }
+            Self::RequestedIpAddress(o) => {
+                buffer.put_u8(OptionCode::RequestedIpAddress as u8);
+                Self::write_ipv4_address(&mut buffer, o);
+            }
+            Self::IPAddressLeaseTime(o) => {
+                buffer.put_u8(OptionCode::IPAddressLeaseTime as u8);
+                Self::write_u32(&mut buffer, *o);
+            }
+            Self::OptionsOverload(o) => {
+                buffer.put_u8(OptionCode::OptionsOverload as u8);
+                Self::write_options_overload(&mut buffer, *o);
+            }
+            Self::DHCPMessageType(o) => {
+                buffer.put_u8(OptionCode::DHCPMessageType as u8);
+                Self::write_dhcp_message_type(&mut buffer, *o);
+            }
+            Self::ServerIdentifier(o) => {
+                buffer.put_u8(OptionCode::ServerIdentifier as u8);
+                Self::write_ipv4_address(&mut buffer, o);
+            }
+            Self::ParameterRequestList(o) => {
+                buffer.put_u8(OptionCode::ParameterRequestList as u8);
+                buffer.put_u8(o.len() as u8);
+                buffer.put_slice(o);
+            }
+            Self::Message(o) => {
+                buffer.put_u8(OptionCode::Message as u8);
+                Self::write_string(&mut buffer, o);
+            }
+            Self::MaximumDHCPMessageSize(o) => {
+                buffer.put_u8(OptionCode::MaximumDHCPMessageSize as u8);
+                Self::write_u16(&mut buffer, *o);
+            }
+            Self::RenewalTimeValue(o) => {
+                buffer.put_u8(OptionCode::RenewalTimeValue as u8);
+                Self::write_u32(&mut buffer, *o);
+            }
+            Self::RebindingTimeValue(o) => {
+                buffer.put_u8(OptionCode::RebindingTimeValue as u8);
+                Self::write_u32(&mut buffer, *o);
+            }
+            Self::ClassIdentifier(o) => {
+                buffer.put_u8(OptionCode::ClassIdentifier as u8);
+                Self::write_string(&mut buffer, o);
+            }
+            Self::ClientIdentifier(o) => {
+                buffer.put_u8(OptionCode::ClientIdentifier as u8);
+                buffer.put_u8(6);
+                buffer.put_u8(1);
+                buffer.put_slice(o.octets().as_ref());
+            }
+        }
+    }
 }
 
 impl DHCPOption {
     fn parse(code: u8, data: &[u8]) -> Option<Self> {
-        match code {
-            1 => Self::parse_ipv4_address(data).map(DHCPOption::SubnetMask),
-            2 => Self::parse_i32(data).map(DHCPOption::TimeOffset),
-            3 => Self::parse_vec_ipv4_address(data).map(DHCPOption::RouterOption),
-            6 => Self::parse_vec_ipv4_address(data).map(DHCPOption::DomainNameServerOption),
-            12 => Self::parse_string(data).map(DHCPOption::HostNameOption),
-            15 => Self::parse_string(data).map(DHCPOption::DomainName),
-            24 => Self::parse_u32(data).map(DHCPOption::PathMTUAgingTimeoutOption),
-            25 => Self::parse_vec_u16(data).map(DHCPOption::PathMTUPlateauOption),
-            28 => Self::parse_ipv4_address(data).map(DHCPOption::BroadcastAddressOption),
-            33 => Self::parse_vec_ipv4_address_tuple(data).map(DHCPOption::StaticRouteOption),
-            42 => {
-                Self::parse_vec_ipv4_address(data).map(DHCPOption::NetworkTimeProtocolServersOption)
+        let Some(option) = OptionCode::from_repr(code) else {
+            // We're not intersted in this option so jump by length
+            debug!(
+                "Found probably uninteresting DHCP Option {:?}={:?} ",
+                code, data
+            );
+            return None;
+        };
+
+        match option {
+            OptionCode::SubnetMask => Self::parse_ipv4_address(data).map(Self::SubnetMask),
+            OptionCode::TimeOffset => Self::parse_i32(data).map(Self::TimeOffset),
+            OptionCode::RouterOption => Self::parse_vec_ipv4_address(data).map(Self::RouterOption),
+            OptionCode::DomainNameServerOption => {
+                Self::parse_vec_ipv4_address(data).map(Self::DomainNameServerOption)
             }
-            50 => Self::parse_ipv4_address(data).map(DHCPOption::RequestedIpAddress),
-            51 => Self::parse_u32(data).map(DHCPOption::IPAddressLeaseTime),
-            52 => Self::parse_options_overload(data).map(DHCPOption::OptionsOverload),
-            53 => Self::parse_dhcp_message_type(data).map(DHCPOption::DHCPMessageType),
-            54 => Self::parse_ipv4_address(data).map(DHCPOption::ServerIdentifier),
-            55 => Some(DHCPOption::ParameterRequestList(data.to_vec())),
-            56 => Self::parse_string(data).map(DHCPOption::Message),
-            57 => Self::parse_u16(data).map(DHCPOption::MaximumDHCPMessageSize),
-            58 => Self::parse_u32(data).map(DHCPOption::RenewalTimeValue),
-            59 => Self::parse_u32(data).map(DHCPOption::RebindingTimeValue),
-            60 => Self::parse_string(data).map(DHCPOption::ClassIdentifier),
-            61 => Self::parse_mac(data).map(DHCPOption::ClientIdentifier),
-            _ => {
-                // We're not intersted in this option so jump by length
-                debug!(
-                    "Found probably uninteresting DHCP Option {:?}={:?} ",
-                    code, data
-                );
-                None
+            OptionCode::HostNameOption => Self::parse_string(data).map(Self::HostNameOption),
+            OptionCode::DomainName => Self::parse_string(data).map(Self::DomainName),
+            OptionCode::PathMTUAgingTimeoutOption => {
+                Self::parse_u32(data).map(Self::PathMTUAgingTimeoutOption)
             }
+            OptionCode::PathMTUPlateauOption => {
+                Self::parse_vec_u16(data).map(Self::PathMTUPlateauOption)
+            }
+            OptionCode::BroadcastAddressOption => {
+                Self::parse_ipv4_address(data).map(Self::BroadcastAddressOption)
+            }
+            OptionCode::StaticRouteOption => {
+                Self::parse_vec_ipv4_address_tuple(data).map(Self::StaticRouteOption)
+            }
+            OptionCode::NetworkTimeProtocolServersOption => {
+                Self::parse_vec_ipv4_address(data).map(Self::NetworkTimeProtocolServersOption)
+            }
+            OptionCode::RequestedIpAddress => {
+                Self::parse_ipv4_address(data).map(Self::RequestedIpAddress)
+            }
+            OptionCode::IPAddressLeaseTime => Self::parse_u32(data).map(Self::IPAddressLeaseTime),
+            OptionCode::OptionsOverload => {
+                Self::parse_options_overload(data).map(Self::OptionsOverload)
+            }
+            OptionCode::DHCPMessageType => {
+                Self::parse_dhcp_message_type(data).map(Self::DHCPMessageType)
+            }
+            OptionCode::ServerIdentifier => {
+                Self::parse_ipv4_address(data).map(Self::ServerIdentifier)
+            }
+            OptionCode::ParameterRequestList => Some(Self::ParameterRequestList(data.to_vec())),
+            OptionCode::Message => Self::parse_string(data).map(Self::Message),
+            OptionCode::MaximumDHCPMessageSize => {
+                Self::parse_u16(data).map(Self::MaximumDHCPMessageSize)
+            }
+            OptionCode::RenewalTimeValue => Self::parse_u32(data).map(Self::RenewalTimeValue),
+            OptionCode::RebindingTimeValue => Self::parse_u32(data).map(Self::RebindingTimeValue),
+            OptionCode::ClassIdentifier => Self::parse_string(data).map(Self::ClassIdentifier),
+            OptionCode::ClientIdentifier => Self::parse_mac(data).map(Self::ClientIdentifier),
         }
     }
 
     fn parse_u16(data: &[u8]) -> Option<u16> {
-        if data.len() != 2 {
-            None
-        } else {
+        if data.len() == 2 {
             Some(u16::from_be_bytes([data[0], data[1]]))
+        } else {
+            None
         }
+    }
+    fn write_u16<A: BufMut>(buf: &mut A, data: u16) {
+        buf.put_u8(2);
+        buf.put_u16(data);
     }
 
     fn parse_u32(data: &[u8]) -> Option<u32> {
-        if data.len() != 4 {
-            None
-        } else {
+        if data.len() == 4 {
             Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+        } else {
+            None
         }
+    }
+    fn write_u32<A: BufMut>(buf: &mut A, data: u32) {
+        buf.put_u8(4);
+        buf.put_u32(data);
     }
 
     fn parse_i32(data: &[u8]) -> Option<i32> {
-        if data.len() != 4 {
-            None
-        } else {
+        if data.len() == 4 {
             Some(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+        } else {
+            None
         }
+    }
+    fn write_i32<A: BufMut>(buf: &mut A, data: i32) {
+        buf.put_u8(4);
+        buf.put_i32(data);
     }
 
     fn parse_vec_u16(data: &[u8]) -> Option<Vec<u16>> {
@@ -490,17 +712,32 @@ impl DHCPOption {
             )
         }
     }
+    fn write_vec_u16<A: BufMut>(buf: &mut A, data: &Vec<u16>) {
+        buf.put_u8(data.len() as u8 * 2);
+        for val in data {
+            buf.put_u16(*val);
+        }
+    }
 
     fn parse_string(data: &[u8]) -> Option<String> {
         String::from_utf8(data.to_vec()).ok()
     }
+    fn write_string<A: BufMut>(buf: &mut A, data: &String) {
+        let bytes = data.as_bytes();
+        buf.put_u8(bytes.len() as u8);
+        buf.put_slice(bytes);
+    }
 
     fn parse_ipv4_address(data: &[u8]) -> Option<Ipv4Addr> {
-        if data.len() != 4 {
-            None
-        } else {
+        if data.len() == 4 {
             Some(Ipv4Addr::new(data[0], data[1], data[2], data[3]))
+        } else {
+            None
         }
+    }
+    fn write_ipv4_address<A: BufMut>(buf: &mut A, data: &Ipv4Addr) {
+        buf.put_u8(4);
+        buf.put_slice(&data.octets());
     }
 
     fn parse_vec_ipv4_address(data: &[u8]) -> Option<Vec<Ipv4Addr>> {
@@ -514,6 +751,13 @@ impl DHCPOption {
             )
         }
     }
+    fn write_vec_ipv4_address<A: BufMut>(buf: &mut A, data: &Vec<Ipv4Addr>) {
+        buf.put_u8(data.len() as u8 * 4);
+        for val in data {
+            buf.put_slice(&val.octets());
+        }
+    }
+
     fn parse_vec_ipv4_address_tuple(data: &[u8]) -> Option<Vec<(Ipv4Addr, Ipv4Addr)>> {
         if data.len() < 8 {
             None
@@ -530,22 +774,33 @@ impl DHCPOption {
             )
         }
     }
+    fn write_vec_ipv4_address_tuple<A: BufMut>(buf: &mut A, data: &Vec<(Ipv4Addr, Ipv4Addr)>) {
+        buf.put_u8(data.len() as u8 * 8);
+        for val in data {
+            buf.put_slice(&val.0.octets());
+            buf.put_slice(&val.1.octets());
+        }
+    }
+
     fn parse_options_overload(data: &[u8]) -> Option<OptionsOverload> {
-        if data.len() != 1 {
-            None
-        } else {
+        if data.len() == 1 {
             match data[0] {
                 1 => Some(OptionsOverload::File),
                 2 => Some(OptionsOverload::ServerName),
                 3 => Some(OptionsOverload::Both),
                 _ => None,
             }
+        } else {
+            None
         }
     }
+    fn write_options_overload<A: BufMut>(buf: &mut A, data: OptionsOverload) {
+        buf.put_u8(1);
+        buf.put_u8(data as u8);
+    }
+
     fn parse_dhcp_message_type(data: &[u8]) -> Option<DHCPMessageType> {
-        if data.len() != 1 {
-            None
-        } else {
+        if data.len() == 1 {
             match data[0] {
                 1 => Some(DHCPMessageType::Discover),
                 2 => Some(DHCPMessageType::Offer),
@@ -556,8 +811,15 @@ impl DHCPOption {
                 7 => Some(DHCPMessageType::Release),
                 _ => None,
             }
+        } else {
+            None
         }
     }
+    fn write_dhcp_message_type<A: BufMut>(buf: &mut A, data: DHCPMessageType) {
+        buf.put_u8(1);
+        buf.put_u8(data as u8);
+    }
+
     fn parse_mac(data: &[u8]) -> Option<MacAddr> {
         if data.len() != 7 || data[0] != 1u8 {
             None
@@ -569,11 +831,12 @@ impl DHCPOption {
     }
 }
 
+#[derive(Debug)]
 struct DHCPOptions(Vec<DHCPOption>);
 
 impl DHCPOptions {
-    fn with(&mut self, other: DHCPOptions) {
-        self.0.extend(other.0.into_iter());
+    fn with(&mut self, other: Self) {
+        self.0.extend(other.0);
     }
 
     fn options_overload(&self) -> Option<OptionsOverload> {
@@ -624,10 +887,27 @@ impl From<&[u8]> for DHCPOptions {
             }
         }
 
-        DHCPOptions(options)
+        Self(options)
     }
 }
 
+impl WriteToBuffer for DHCPOptions {
+    fn encoded_length(&self) -> usize {
+        // Start at 1 as the options collection will contain at least 255 end
+        self.0.iter().fold(1, |acc, x| acc + x.encoded_length())
+    }
+
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
+        for option in &self.0 {
+            option.write_to_buffer(&mut buffer);
+            buffer.put_u8(255);
+        }
+    }
+}
+
+/// DHCP Message
+///
+/// ```text
 /// 0                   1                   2                   3
 /// 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 /// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -659,6 +939,8 @@ impl From<&[u8]> for DHCPOptions {
 /// |                                                               |
 /// |                          options (variable)                   |
 /// +---------------------------------------------------------------+
+/// ```
+#[derive(Debug)]
 pub struct DHCP {
     /// Message op code / message type.
     /// 1 = BOOTREQUEST, 2 = BOOTREPLY
@@ -763,18 +1045,18 @@ impl TryFrom<&[u8]> for DHCP {
 
         let mut server_hostname = None;
         if let Some(OptionsOverload::ServerName | OptionsOverload::Both) = overload {
-            options.with(value[44..108].into())
+            options.with(value[44..108].into());
         } else {
-            server_hostname =
-                str_from_null_terminated_utf8(&value[44..108])?.map(|x| x.to_string());
+            server_hostname = str_from_null_terminated_utf8(&value[44..108])?
+                .map(std::string::ToString::to_string);
         }
 
         let mut boot_file_name = None;
         if let Some(OptionsOverload::File | OptionsOverload::Both) = overload {
-            options.with(value[108..236].into())
+            options.with(value[108..236].into());
         } else {
-            boot_file_name =
-                str_from_null_terminated_utf8(&value[108..236])?.map(|x| x.to_string());
+            boot_file_name = str_from_null_terminated_utf8(&value[108..236])?
+                .map(std::string::ToString::to_string);
         }
 
         Ok(Self {
@@ -796,6 +1078,16 @@ impl TryFrom<&[u8]> for DHCP {
     }
 }
 
+impl WriteToBuffer for DHCP {
+    fn encoded_length(&self) -> usize {
+        todo!()
+    }
+
+    fn write_to_buffer<Buf: BufMut>(&self, buffer: Buf) {
+        todo!()
+    }
+}
+
 impl DHCP {
     /// 236 DHCP/BOOTP Message Header + 4 byte "Magic Cookie"
     // I don't think this would actually be a valid DHCP packet but thats to be determined as we dive into the spec
@@ -803,8 +1095,39 @@ impl DHCP {
 
     /// DHCPDISCOVER
     /// Client broadcast to locate available servers.
-    pub fn discover() -> Self {
-        todo!()
+    ///
+    /// Page 36
+    pub fn discover(transaction_id: u32, started: time::Instant, mac_addr: MacAddr) -> Self {
+        let mut client_hardware_addr = [0u8; 16];
+        client_hardware_addr[..6].copy_from_slice(&mac_addr.octets());
+
+        let mut options = Vec::new();
+        // TODO requested IP Address
+        // TODO Ip Address Lease time
+
+        options.push(DHCPOption::DHCPMessageType(DHCPMessageType::Discover));
+
+        // TODO client identifier
+        // TODO vendor class information ??
+        // TODO parameter request list
+        // TODO maximum message size
+
+        Self {
+            operation: Operation::BootRequest,
+            hardware_type: HardwareType::Ethernet,
+            hops: 0,
+            transaction_id,
+            secs: time::Instant::now().duration_since(started).as_secs() as u16,
+            flags: Flags { broadcast: false }, // or true?
+            client_ip_addr: None,
+            your_ip_addr: None,
+            next_server_ip_addr: None,
+            relay_agent_ip_addr: None,
+            client_hardware_addr,
+            server_hostname: None,
+            boot_file_name: None,
+            options: DHCPOptions(options),
+        }
     }
 
     /// DHCPOFFER
