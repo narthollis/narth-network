@@ -1,5 +1,4 @@
 use crate::common::err_as_eof;
-use crate::protocols::arp::HardwareType;
 use crate::protocols::ethernet::mac::MacAddr;
 use crate::write_to_buffer::WriteToBuffer;
 use bytes::BufMut;
@@ -13,6 +12,15 @@ use tracing::debug;
 enum Operation {
     BootRequest = 1,
     BootReply = 2,
+}
+
+impl From<Operation> for u8 {
+    fn from(value: Operation) -> u8 {
+        match value {
+            Operation::BootRequest => 1,
+            Operation::BootReply => 2,
+        }
+    }
 }
 
 ///                     1 1 1 1 1 1
@@ -46,6 +54,16 @@ impl TryFrom<[u8; 2]> for Flags {
         };
 
         Ok(Self { broadcast })
+    }
+}
+
+impl From<Flags> for u16 {
+    fn from(value: Flags) -> u16 {
+        if value.broadcast {
+            0b1000_0000_0000_0000
+        } else {
+            0b0000_0000_0000_0000
+        }
     }
 }
 
@@ -856,8 +874,7 @@ impl From<&[u8]> for DHCPOptions {
             // Increment the position now we have read code
             position += 1;
 
-            // HAPPY PATH - HAPPY PATH - HAPPY PATH
-            // 255 = End - THIS IS THE HAPPY PATH RETURN
+            // 255 = End
             if code == 255 {
                 break;
             }
@@ -945,8 +962,8 @@ pub struct DHCP {
     /// Message op code / message type.
     /// 1 = BOOTREQUEST, 2 = BOOTREPLY
     operation: Operation,
-    /// Hardware address type, see ARP section in "Assigned Numbers" RFC; e.g., '1' = 10mb ethernet.
-    hardware_type: super::super::arp::HardwareType,
+    // Hardware address type, see ARP section in "Assigned Numbers" RFC; e.g., '1' = 10mb ethernet.
+    // hardware_type: super::super::arp::HardwareType,
     // Hardware address length (e.g.  '6' for 10mb ethernet).
     // hardware_len: u8, // this is defined by the above
     /// Client sets to zero, optionally used by relay agents when booting via a relay agent.
@@ -1008,11 +1025,11 @@ impl TryFrom<&[u8]> for DHCP {
         if value[1] != 1u8 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Unsupported Hardware Type Operation",
+                "Unsupported Hardware Type",
             ));
         }
 
-        let hardware_type = HardwareType::Ethernet;
+        // let hardware_type = HardwareType::Ethernet;
         // let hardware_len = value[2];
         let hops = value[3];
 
@@ -1061,7 +1078,6 @@ impl TryFrom<&[u8]> for DHCP {
 
         Ok(Self {
             operation,
-            hardware_type,
             hops,
             transaction_id,
             secs,
@@ -1080,11 +1096,62 @@ impl TryFrom<&[u8]> for DHCP {
 
 impl WriteToBuffer for DHCP {
     fn encoded_length(&self) -> usize {
-        todo!()
+        (const {
+            4 // op, htype, hlem, hops
+            + 4 // xid
+            + 4 // secs + flags
+            + 16 // ciaddr, yiaddr, siaddr, giaddr
+            + 16 // chaddr
+            + 64 // sname
+            + 128 // file
+        }) + self.options.encoded_length()
     }
 
-    fn write_to_buffer<Buf: BufMut>(&self, buffer: Buf) {
-        todo!()
+    fn write_to_buffer<Buf: BufMut>(&self, mut buffer: Buf) {
+        buffer.put_u8(self.operation.into());
+        buffer.put_u8(1); // Ethernet
+        buffer.put_u8(6); // Ethernet=6 Octets
+        buffer.put_u8(self.hops);
+
+        buffer.put_u32(self.transaction_id);
+
+        buffer.put_u16(self.secs);
+        buffer.put_u16(self.flags.into());
+
+        if let Some(ciaddr) = self.client_ip_addr {
+            buffer.put_slice(&ciaddr.octets());
+        } else {
+            buffer.put_u32(0);
+        }
+
+        if let Some(yiaddr) = self.your_ip_addr {
+            buffer.put_slice(&yiaddr.octets());
+        } else {
+            buffer.put_u32(0);
+        }
+
+        if let Some(siaddr) = self.next_server_ip_addr {
+            buffer.put_slice(&siaddr.octets());
+        } else {
+            buffer.put_u32(0);
+        }
+
+        if let Some(giaddr) = self.relay_agent_ip_addr {
+            buffer.put_slice(&giaddr.octets());
+        } else {
+            buffer.put_u32(0);
+        }
+
+        buffer.put_slice(&self.client_hardware_addr[..]);
+
+        // TODO check options for if we're packing options into server hostname and/or boot file
+        // name
+        if let Some(server_hostname) = &self.server_hostname {
+            buffer.put_slice(&server_hostname.as_bytes()[..64]);
+        }
+        if let Some(boot_file_name) = &self.boot_file_name {
+            buffer.put_slice(&boot_file_name.as_bytes()[..128]);
+        }
     }
 }
 
@@ -1114,7 +1181,6 @@ impl DHCP {
 
         Self {
             operation: Operation::BootRequest,
-            hardware_type: HardwareType::Ethernet,
             hops: 0,
             transaction_id,
             secs: time::Instant::now().duration_since(started).as_secs() as u16,
