@@ -4,6 +4,7 @@ use crate::write_to_buffer::WriteToBuffer;
 use bytes::BufMut;
 use std::net::Ipv4Addr;
 use std::time;
+use std::time::Duration;
 use strum::{EnumDiscriminants, FromRepr};
 use tracing::debug;
 
@@ -305,7 +306,7 @@ pub enum DHCPOption {
     /// |  51 |  4  |  t1 |  t2 |  t3 |  t4 |
     /// +-----+-----+-----+-----+-----+-----+
     /// ```
-    IPAddressLeaseTime(u32) = 51,
+    IPAddressLeaseTime(Duration) = 51,
     /// fields are being overloaded by using them to carry DHCP options. A
     /// DHCP server inserts this option if the returned parameters will
     /// exceed the usual space allotted for options.
@@ -387,7 +388,7 @@ pub enum DHCPOption {
     /// |  55 |  n  |  c1 |  c2 | ...
     /// +-----+-----+-----+-----+---
     /// ```
-    ParameterRequestList(Vec<u8>) = 55,
+    ParameterRequestList(Vec<OptionCode>) = 55,
     /// This option is used by a DHCP server to provide an error message to a
     /// DHCP client in a DHCPNAK message in the event of a failure. A client
     /// may use this option in a DHCPDECLINE message to indicate the why the
@@ -574,7 +575,7 @@ impl WriteToBuffer for DHCPOption {
             }
             Self::IPAddressLeaseTime(o) => {
                 buffer.put_u8(OptionCode::IPAddressLeaseTime as u8);
-                Self::write_u32(&mut buffer, *o);
+                Self::write_u32(&mut buffer, o.as_secs() as u32);
             }
             Self::OptionsOverload(o) => {
                 buffer.put_u8(OptionCode::OptionsOverload as u8);
@@ -591,7 +592,9 @@ impl WriteToBuffer for DHCPOption {
             Self::ParameterRequestList(o) => {
                 buffer.put_u8(OptionCode::ParameterRequestList as u8);
                 buffer.put_u8(o.len() as u8);
-                buffer.put_slice(o);
+                for code in o {
+                    buffer.put_u8(*code as u8);
+                }
             }
             Self::Message(o) => {
                 buffer.put_u8(OptionCode::Message as u8);
@@ -661,7 +664,9 @@ impl DHCPOption {
             OptionCode::RequestedIpAddress => {
                 Self::parse_ipv4_address(data).map(Self::RequestedIpAddress)
             }
-            OptionCode::IPAddressLeaseTime => Self::parse_u32(data).map(Self::IPAddressLeaseTime),
+            OptionCode::IPAddressLeaseTime => {
+                Self::parse_duration_seconds(data).map(Self::IPAddressLeaseTime)
+            }
             OptionCode::OptionsOverload => {
                 Self::parse_options_overload(data).map(Self::OptionsOverload)
             }
@@ -671,7 +676,9 @@ impl DHCPOption {
             OptionCode::ServerIdentifier => {
                 Self::parse_ipv4_address(data).map(Self::ServerIdentifier)
             }
-            OptionCode::ParameterRequestList => Some(Self::ParameterRequestList(data.to_vec())),
+            OptionCode::ParameterRequestList => {
+                Self::parse_vec_option_code(data).map(Self::ParameterRequestList)
+            }
             OptionCode::Message => Self::parse_string(data).map(Self::Message),
             OptionCode::MaximumDHCPMessageSize => {
                 Self::parse_u16(data).map(Self::MaximumDHCPMessageSize)
@@ -702,6 +709,11 @@ impl DHCPOption {
             None
         }
     }
+
+    fn parse_duration_seconds(data: &[u8]) -> Option<Duration> {
+        Self::parse_u32(data).map(|d| Duration::from_secs(d.into()))
+    }
+
     fn write_u32<A: BufMut>(buf: &mut A, data: u32) {
         buf.put_u8(4);
         buf.put_u32(data);
@@ -847,6 +859,14 @@ impl DHCPOption {
             ))
         }
     }
+
+    fn parse_vec_option_code(data: &[u8]) -> Option<Vec<OptionCode>> {
+        let r: Vec<OptionCode> = data
+            .iter()
+            .filter_map(|i| OptionCode::from_repr(*i))
+            .collect();
+        if r.len() > 0 { Some(r) } else { None }
+    }
 }
 
 #[derive(Debug)]
@@ -975,15 +995,15 @@ pub struct DHCP {
     secs: u16,
     /// see [`Flags`]
     flags: Flags,
-    /// Client IP address; only filled in if client is in BOUND, RENEW or REBINDING state
+    /// (ciaddr) Client IP address; only filled in if client is in BOUND, RENEW or REBINDING state
     /// and can respond to ARP requests.
     client_ip_addr: Option<Ipv4Addr>,
-    /// 'your' (client) IP address.
+    /// (yiaddr) 'your' (client) IP address.
     /// -- that is the IP address offered to this client by the server to become its IP address
     your_ip_addr: Option<Ipv4Addr>,
-    /// IP address of next server to use in bootstrap; returned in DHCPOFFER, DHCPACK by server.
+    /// (siaddr) IP address of next server to use in bootstrap; returned in DHCPOFFER, DHCPACK by server.
     next_server_ip_addr: Option<Ipv4Addr>,
-    /// Relay agent IP address, used in booting via a relay agent.
+    /// (giaddr) Relay agent IP address, used in booting via a relay agent.
     relay_agent_ip_addr: Option<Ipv4Addr>,
     /// Client hardware Address
     client_hardware_addr: [u8; 16], // Not quite sure what this is but i don't think it's a mac addr
@@ -1096,6 +1116,8 @@ impl TryFrom<&[u8]> for DHCP {
 
 impl WriteToBuffer for DHCP {
     fn encoded_length(&self) -> usize {
+        // TODO This also needs awareness of if we packing options into servername and/or boot filename
+
         (const {
             4 // op, htype, hlem, hops
             + 4 // xid
@@ -1144,8 +1166,7 @@ impl WriteToBuffer for DHCP {
 
         buffer.put_slice(&self.client_hardware_addr[..]);
 
-        // TODO check options for if we're packing options into server hostname and/or boot file
-        // name
+        // TODO check options for if we're packing options into server hostname and/or boot file name
         if let Some(server_hostname) = &self.server_hostname {
             buffer.put_slice(&server_hostname.as_bytes()[..64]);
         }
@@ -1164,19 +1185,33 @@ impl DHCP {
     /// Client broadcast to locate available servers.
     ///
     /// Page 36
-    pub fn discover(transaction_id: u32, started: time::Instant, mac_addr: MacAddr) -> Self {
+    #[must_use]
+    pub fn discover(
+        transaction_id: u32,
+        started: time::Instant,
+        mac_addr: MacAddr,
+        parameters: Option<Vec<OptionCode>>,
+        addr: Option<Ipv4Addr>,
+        lease_time: Option<Duration>,
+    ) -> Self {
         let mut client_hardware_addr = [0u8; 16];
         client_hardware_addr[..6].copy_from_slice(&mac_addr.octets());
 
-        let mut options = Vec::new();
-        // TODO requested IP Address
-        // TODO Ip Address Lease time
+        let mut options = vec![
+            DHCPOption::DHCPMessageType(DHCPMessageType::Discover),
+            DHCPOption::ClientIdentifier(mac_addr),
+        ];
+        if let Some(parameters) = parameters {
+            options.push(DHCPOption::ParameterRequestList(parameters));
+        }
+        if let Some(addr) = addr {
+            options.push(DHCPOption::RequestedIpAddress(addr));
+        }
+        if let Some(lease_time) = lease_time {
+            options.push(DHCPOption::IPAddressLeaseTime(lease_time));
+        }
 
-        options.push(DHCPOption::DHCPMessageType(DHCPMessageType::Discover));
-
-        // TODO client identifier
         // TODO vendor class information ??
-        // TODO parameter request list
         // TODO maximum message size
 
         Self {

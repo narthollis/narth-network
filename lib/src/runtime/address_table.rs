@@ -35,6 +35,10 @@ impl AddressTableIpv4 {
         self.shared.clone()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.local.is_empty()
+    }
+
     fn update(&self) {
         let next = self.local.iter().map(|a| (a.address, a.mask)).collect();
         let mut shared = self.shared.write().expect("shared lock poisoned");

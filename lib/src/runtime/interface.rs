@@ -98,6 +98,7 @@ pub(crate) enum InterfaceControlMessage {
 
 #[derive(Debug, Clone)]
 pub struct Interface {
+    mac_addr: MacAddr,
     control_tx: mpsc::SyncSender<InterfaceControlMessage>,
     ipv4_addresses: Arc<RwLock<Vec<(Ipv4Addr, Ipv4Addr)>>>,
     ipv4_routes: Arc<RwLock<Vec<RouteInformation<Ipv4Addr>>>>,
@@ -106,14 +107,15 @@ pub struct Interface {
 impl Interface {
     pub(super) fn new(
         mtu: usize,
-        mac_address: MacAddr,
+        mac_addr: MacAddr,
         network_tx: super::channel::NetworkSender,
         network_rx: super::channel::RingBufConsumer<super::channel::NetworkRecvPayload>,
     ) -> (Self, InterfaceWorker) {
         let (control_tx, control_rx) = mpsc::sync_channel(10);
 
-        let worker = InterfaceWorker::new(control_rx, network_tx, network_rx, mtu, mac_address);
+        let worker = InterfaceWorker::new(control_rx, network_tx, network_rx, mtu, mac_addr);
         let interface = Self {
+            mac_addr,
             control_tx,
             ipv4_addresses: worker.context.ipv4_addresses.shared(),
             ipv4_routes: worker.context.ipv4_route_table.shared(),
@@ -146,6 +148,11 @@ impl Interface {
             .map_err(|_| Error::ControlFailed)?;
 
         rx.recv().map_err(|_| Error::ControlFailed)?
+    }
+
+    #[must_use]
+    pub const fn mac_addr(&self) -> MacAddr {
+        self.mac_addr
     }
 
     pub fn ipv4_address_add(&self, addr: Ipv4Addr, prefix: u8) -> Result<()> {

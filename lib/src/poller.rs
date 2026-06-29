@@ -120,6 +120,13 @@ impl Poller {
     ) -> Result<ReadyTokensByBits<'_>, PollerTimeoutError> {
         let deadline = Instant::now() + duration;
 
+        self.poll_deadline(deadline)
+    }
+
+    pub fn poll_deadline(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<ReadyTokensByBits<'_>, PollerTimeoutError> {
         loop {
             if deadline <= Instant::now() {
                 return Err(PollerTimeoutError::Timeout);

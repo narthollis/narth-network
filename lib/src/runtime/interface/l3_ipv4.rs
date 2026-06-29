@@ -1,5 +1,6 @@
 use crate::protocols::ipv4::icmp::{ICMPMessage, ICMPMessageTypes};
 use crate::protocols::ipv4::{IPProtocolTypes, IPv4Header};
+use crate::protocols::udp::UdpHeader;
 use crate::runtime::interface::l4_managers::Managers;
 use crate::runtime::interface::{AsyncSendError, InterfaceContext, SendError, SendResult};
 use crate::write_to_buffer::WriteToBuffer;
@@ -20,6 +21,24 @@ impl IPv4Handler {
         }
     }
 
+    /// This checks if the interface currently lacks and IPv4 address, and if so accepts packets
+    /// that look like they should be DHCP packets - ie. UDP packets from the DHCP Server Port (67)
+    /// to the DHCP Client Port (68)
+    fn is_acceptable_for_dhcp(
+        ctx: &InterfaceContext,
+        ip: IPv4Header,
+        payload: &bytes::Bytes,
+    ) -> bool {
+        if ctx.ipv4_addresses.is_empty() && ip.protocol() == IPProtocolTypes::UDP {
+            if let Ok(udp_header) = UdpHeader::from_bytes(payload) {
+                return udp_header.destination_port() == crate::services::dhcpv4::CLIENT_PORT
+                    && udp_header.source_port() == crate::services::dhcpv4::SERVER_PORT;
+            }
+        }
+
+        false
+    }
+
     pub fn recv(ctx: &mut InterfaceContext, managers: &mut Managers, bytes: &bytes::Bytes) {
         let ip = match IPv4Header::from_bytes(bytes) {
             Ok(ip) => ip,
@@ -32,11 +51,16 @@ impl IPv4Handler {
             trace!("dropping fragmented IPv4");
             return;
         }
-        if !Self::is_addr_acceptable(ctx, ip.destination_address()) {
-            return; // drop
-        }
 
         let payload = &bytes.slice(ip.encoded_length()..ip.total_length());
+
+        if !Self::is_addr_acceptable(ctx, ip.destination_address()) {
+            // Doing the dirty for DHCP
+            // accept for any IPv4 addr if and only if the packet is UDP from DHCP Server->DHCP Client
+            if !Self::is_acceptable_for_dhcp(ctx, ip, payload) {
+                return; // drop
+            }
+        }
 
         trace_span!(
             "recv l3_ipv4",
